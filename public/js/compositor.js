@@ -129,6 +129,19 @@ export class ProgramCompositor {
     return this.audioContext;
   }
 
+  /**
+   * Browsers start audio contexts suspended until a user gesture; call this from
+   * a click handler so program audio is actually captured.
+   */
+  resumeAudio() {
+    const context = this._ensureAudio();
+    if (!context) return false;
+    if (context.state === 'suspended' && typeof context.resume === 'function') {
+      context.resume().catch(() => {});
+    }
+    return true;
+  }
+
   /** Keep the audio mixer in sync with the current source list. */
   _syncAudioGraph() {
     const context = this._ensureAudio();

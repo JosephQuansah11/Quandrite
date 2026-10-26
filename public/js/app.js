@@ -64,6 +64,11 @@ function boot() {
 
   state.socket.connect();
 
+  // Audio contexts need a user gesture; resume on the first interaction.
+  const resumeAudio = () => state.compositor.resumeAudio();
+  document.addEventListener('pointerdown', resumeAudio, { once: true });
+  document.addEventListener('keydown', resumeAudio, { once: true });
+
   const params = new URLSearchParams(location.search);
   if (params.get('room')) $('#join-room').value = params.get('room');
   if (params.get('name')) $('#join-name').value = params.get('name');
@@ -630,6 +635,7 @@ async function goLive() {
   }
   const preset = $('#stream-preset').value;
   const record = $('#stream-record').checked;
+  state.compositor.resumeAudio();
   const result = await send(CLIENT.STREAM_START, { preset, record });
   if (!result) return;
 
