@@ -72,6 +72,9 @@ function boot() {
   const params = new URLSearchParams(location.search);
   if (params.get('room')) $('#join-room').value = params.get('room');
   if (params.get('name')) $('#join-name').value = params.get('name');
+
+  // Nothing can be published before joining a room.
+  updateControlAvailability();
 }
 
 function wireSocket() {
