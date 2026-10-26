@@ -75,20 +75,28 @@ export function escapeTeePath(target) {
   return String(target).replace(/([\\|:'])/g, '\\$1');
 }
 
+/** The tee muxer only accepts these two values for `onfail`. */
+export const TEE_ONFAIL_VALUES = Object.freeze(['abort', 'ignore']);
+
+export function normalizeOnfail(value) {
+  return TEE_ONFAIL_VALUES.includes(value) ? value : 'ignore';
+}
+
 /**
  * Build the `-f tee` argument value.
+ *
+ * Each slave is described as `[f=format:onfail=...]target`. `onfail=ignore`
+ * keeps one dead platform from killing the whole broadcast.
  *
  * @param {Array<{kind: 'rtmp'|'file', url?: string, path?: string, format?: string, onfail?: string}>} targets
  */
 export function buildTeeSpec(targets = []) {
   return targets
     .map((target) => {
+      const onfail = normalizeOnfail(target.onfail);
       if (target.kind === 'file') {
-        const format = target.format || 'matroska';
-        const onfail = target.onfail || 'warn';
-        return `[f=${format}:onfail=${onfail}]${escapeTeePath(target.path)}`;
+        return `[f=${target.format || 'matroska'}:onfail=${onfail}]${escapeTeePath(target.path)}`;
       }
-      const onfail = target.onfail || 'ignore';
       return `[f=flv:onfail=${onfail}]${target.url}`;
     })
     .join('|');

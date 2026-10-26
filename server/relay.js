@@ -119,6 +119,8 @@ export class StreamRelay extends EventEmitter {
       this.stderrTail = (this.stderrTail + chunk).slice(-4000);
       const detected = detectRelayError(chunk);
       if (detected) this.error = detected;
+      const trimmed = String(chunk).trim();
+      if (trimmed) this.emit('log', { level: 'warn', message: trimmed });
       this.emit('stderr', chunk);
     });
 

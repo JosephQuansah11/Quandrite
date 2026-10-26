@@ -134,17 +134,17 @@ export class SignalingServer {
     this._send(session, { type: SERVER.ERROR, id, message });
   }
 
-  _requireRoom(session) {
+  _requireRoom(session, id) {
     if (!session.studio) {
-      this._fail(session, null, 'join a room first');
+      this._fail(session, id, 'join a room first');
       return false;
     }
     return true;
   }
 
-  _requireControl(session) {
+  _requireControl(session, id) {
     if (!canControlBroadcast(session.role)) {
-      this._fail(session, null, 'only the host or a co-host can control the broadcast');
+      this._fail(session, id, 'only the host or a co-host can control the broadcast');
       return false;
     }
     return true;
@@ -273,7 +273,7 @@ export class SignalingServer {
         this._send(session, { type: SERVER.PONG, at: Date.now(), id });
         return undefined;
       case CLIENT.CHAT_SEND: {
-        if (!this._requireRoom(session)) return undefined;
+        if (!this._requireRoom(session, id)) return undefined;
         const posted = session.studio.addChat({
           authorId: session.id,
           authorName: session.name,
@@ -284,20 +284,20 @@ export class SignalingServer {
         return undefined;
       }
       case CLIENT.MEMBER_UPDATE: {
-        if (!this._requireRoom(session)) return undefined;
+        if (!this._requireRoom(session, id)) return undefined;
         session.studio.updateMember(session.id, message.patch || {});
         this._ack(session, id, { updated: true });
         return undefined;
       }
       case CLIENT.SOURCE_ADD: {
-        if (!this._requireRoom(session)) return undefined;
+        if (!this._requireRoom(session, id)) return undefined;
         const result = session.studio.addSource({ ...(message.source || {}), ownerId: session.id });
         if (!result.ok) return this._fail(session, id, result.error);
         this._ack(session, id, { source: result.source });
         return undefined;
       }
       case CLIENT.SOURCE_UPDATE: {
-        if (!this._requireRoom(session)) return undefined;
+        if (!this._requireRoom(session, id)) return undefined;
         const result = session.studio.updateSource(message.sourceId, message.patch || {}, {
           byId: session.id,
         });
@@ -306,14 +306,14 @@ export class SignalingServer {
         return undefined;
       }
       case CLIENT.SOURCE_REMOVE: {
-        if (!this._requireRoom(session)) return undefined;
+        if (!this._requireRoom(session, id)) return undefined;
         const result = session.studio.removeSource(message.sourceId, { byId: session.id });
         if (!result.ok) return this._fail(session, id, result.error);
         this._ack(session, id, { removed: message.sourceId });
         return undefined;
       }
       case CLIENT.PROGRAM_SET: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = session.studio.setProgram({
           mode: message.mode,
           sourceId: message.sourceId,
@@ -324,41 +324,41 @@ export class SignalingServer {
         return undefined;
       }
       case CLIENT.SCENE_SET: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = session.studio.setScene({ ...(message.scene || {}), createdBy: session.id });
         if (!result.ok) return this._fail(session, id, result.errors.join('; '));
         this._ack(session, id, { scene: result.scene });
         return undefined;
       }
       case CLIENT.SCENE_CLEAR: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = session.studio.clearScene();
         this._ack(session, id, { cleared: result.cleared });
         return undefined;
       }
       case CLIENT.DESTINATION_ADD: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = session.studio.addDestination(message.destination || {});
         if (!result.ok) return this._fail(session, id, result.errors?.join('; ') || result.error);
         this._ack(session, id, { destination: result.destination });
         return undefined;
       }
       case CLIENT.DESTINATION_UPDATE: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = session.studio.updateDestination(message.destinationId, message.patch || {});
         if (!result.ok) return this._fail(session, id, result.errors?.join('; ') || result.error);
         this._ack(session, id, { destination: result.destination });
         return undefined;
       }
       case CLIENT.DESTINATION_REMOVE: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = session.studio.removeDestination(message.destinationId);
         if (!result.ok) return this._fail(session, id, result.error);
         this._ack(session, id, { removed: message.destinationId });
         return undefined;
       }
       case CLIENT.STREAM_START: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = await session.studio.startStream({
           preset: message.preset,
           record: Boolean(message.record),
@@ -369,14 +369,14 @@ export class SignalingServer {
         return undefined;
       }
       case CLIENT.STREAM_STOP: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = await session.studio.stopStream({ byId: session.id });
         if (!result.ok) return this._fail(session, id, result.error);
         this._ack(session, id, { stream: result.stream });
         return undefined;
       }
       case CLIENT.RECORD_START: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         if (session.studio.relay) {
           return this._fail(session, id, 'a broadcast is already running - stop it before recording again');
         }
@@ -386,14 +386,14 @@ export class SignalingServer {
         return undefined;
       }
       case CLIENT.RECORD_STOP: {
-        if (!this._requireControl(session)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
         const result = await session.studio.stopStream({ byId: session.id, reason: 'recording-stop' });
         if (!result.ok) return this._fail(session, id, result.error);
         this._ack(session, id, { stream: result.stream });
         return undefined;
       }
       case CLIENT.WEBRTC_SIGNAL: {
-        if (!this._requireRoom(session)) return undefined;
+        if (!this._requireRoom(session, id)) return undefined;
         const target = this.sessions.get(message.to);
         if (!target || target.studio !== session.studio) {
           return this._fail(session, id, 'peer is not in this room');

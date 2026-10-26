@@ -32,6 +32,7 @@ export class Studio extends EventEmitter {
     hostName = 'Host',
     config,
     recordingStore = null,
+    relayFactory = null,
     logger = console,
   }) {
     super();
@@ -39,6 +40,7 @@ export class Studio extends EventEmitter {
     this.name = cleanText(name, 80) || id;
     this.config = config;
     this.recordingStore = recordingStore;
+    this.relayFactory = relayFactory;
     this.logger = logger;
     this.createdAt = Date.now();
 
@@ -300,13 +302,14 @@ export class Studio extends EventEmitter {
    */
   setProgram({ mode, sourceId, gridIds } = {}) {
     const next = { ...this.program };
+    const explicitGrid = gridIds !== undefined;
 
     if (mode !== undefined) {
       if (!PROGRAM_MODES.includes(mode)) return { ok: false, error: `unsupported program mode: ${mode}` };
       next.mode = mode;
     }
 
-    if (gridIds !== undefined) {
+    if (explicitGrid) {
       if (!Array.isArray(gridIds)) return { ok: false, error: 'gridIds must be an array' };
       next.gridIds = [...new Set(gridIds.map((id) => String(id)))].filter((id) => this.sources.has(id));
     }
@@ -317,17 +320,21 @@ export class Studio extends EventEmitter {
       else next.sourceId = sourceId;
     }
 
-    if (next.mode === 'grid' && next.gridIds.length === 0) {
+    // "Grid mode" without an explicit list means "every camera and screen".
+    if (next.mode === 'grid' && (!explicitGrid || next.gridIds.length === 0)) {
       next.gridIds = [...this.sources.values()]
         .filter((source) => source.kind !== 'audio')
         .map((source) => source.id);
       if (next.gridIds.length === 0) return { ok: false, error: 'no sources available for the grid' };
     }
 
-    if (next.mode === 'screenshare' && !next.sourceId) {
-      const screen = [...this.sources.values()].find((source) => source.kind === 'screen');
-      if (!screen) return { ok: false, error: 'no screen share source available' };
-      next.sourceId = screen.id;
+    if (next.mode === 'screenshare') {
+      const current = next.sourceId ? this.sources.get(next.sourceId) : null;
+      if (!current || current.kind !== 'screen') {
+        const screen = [...this.sources.values()].find((source) => source.kind === 'screen');
+        if (!screen) return { ok: false, error: 'no screen share source available' };
+        next.sourceId = screen.id;
+      }
     }
 
     if (!next.sourceId && next.mode !== 'grid') next.sourceId = this._fallbackSourceId();
@@ -466,10 +473,15 @@ export class Studio extends EventEmitter {
 
   // ----------------------------------------------------------------- stream
 
-  _teeFormatFor(extension) {
-    if (extension === 'mp4') return 'mp4';
-    if (extension === 'webm') return 'webm';
-    return 'matroska';
+  /**
+   * Container used for the recording slave of the tee muxer.
+   *
+   * The tee muxer cannot write Matroska slaves ("error writing header"), so a
+   * fan-out recording is always MP4. The relay always closes ffmpeg's stdin
+   * gracefully, which lets the MP4 muxer write its index before exiting.
+   */
+  _recordingFormat() {
+    return 'mp4';
   }
 
   _buildTargets(recordingEntry) {
@@ -483,8 +495,8 @@ export class Studio extends EventEmitter {
       targets.push({
         kind: 'file',
         path: this.recordingStore.absPath(recordingEntry),
-        format: this._teeFormatFor(recordingEntry.format),
-        onfail: 'warn',
+        format: this._recordingFormat(),
+        onfail: 'ignore',
         recordingId: recordingEntry.id,
       });
     }
@@ -492,7 +504,7 @@ export class Studio extends EventEmitter {
   }
 
   _createRelay(targets, preset) {
-    const relay = new StreamRelay({
+    const options = {
       ffmpegBin: this.config.ffmpegBin,
       roomId: this.id,
       preset,
@@ -501,7 +513,8 @@ export class Studio extends EventEmitter {
       audioBitrateKbps: this.config.audioBitrateKbps,
       relayOptions: this.config.relay,
       logger: this.logger,
-    });
+    };
+    const relay = this.relayFactory ? this.relayFactory(options) : new StreamRelay(options);
 
     relay.on('status', (snapshot) => {
       if (this.relay !== relay) return;
@@ -568,7 +581,7 @@ export class Studio extends EventEmitter {
       recordingEntry = await this.recordingStore.create({
         roomId: this.id,
         roomName: this.name,
-        format: this.config.recordFormat,
+        format: this._recordingFormat(),
         preset: chosenPreset,
         destinations: destinations.map((destination) => destination.label),
       });
@@ -752,6 +765,7 @@ export class Studio extends EventEmitter {
       bitrateKbps: metrics?.bitrateKbps ?? 0,
       bytesIn: metrics?.bytesIn ?? 0,
       restarts: metrics?.restarts ?? 0,
+      recording: this.recording.status === 'recording',
       destinationStatuses: this.enabledDestinations().map((destination) => ({
         id: destination.id,
         label: destination.label,

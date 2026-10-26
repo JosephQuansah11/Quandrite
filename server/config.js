@@ -71,7 +71,7 @@ export function loadConfig(overrides = {}) {
     ffmpegBin: resolveFfmpegBin(overrides.ffmpegBin),
     defaultPreset: process.env.QUANDRITE_PRESET || '1080p30',
     defaultInputFormat: process.env.QUANDRITE_INPUT_FORMAT || 'matroska',
-    recordFormat: process.env.QUANDRITE_RECORD_FORMAT || 'mkv',
+    recordFormat: process.env.QUANDRITE_RECORD_FORMAT || 'mp4',
     remuxRecordingToMp4: process.env.QUANDRITE_REMUX_MP4 !== '0',
     audioBitrateKbps: intEnv('QUANDRITE_AUDIO_KBPS', 160),
     chatLimit: intEnv('QUANDRITE_CHAT_LIMIT', 500),
