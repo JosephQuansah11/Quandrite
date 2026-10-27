@@ -8,9 +8,36 @@
 
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { buildRelayArgs, detectRelayError } from './ffmpeg.js';
+import { buildRelayArgs, detectRelayError } from './ffmpeg.ts';
 
 export class StreamRelay extends EventEmitter {
+
+  // --- state (typed loosely while the class is migrated) ---
+  _lastSampleAt: any;
+  _lastSampleBytes: any;
+  _liveTimer: any;
+  _metricsTimer: any;
+  _restartTimer: any;
+  audioBitrateKbps: any;
+  bytesIn: any;
+  child: any;
+  endedAt: any;
+  error: any;
+  exitCode: any;
+  ffmpegBin: any;
+  inputFormat: any;
+  logger: any;
+  measuredBitrateKbps: any;
+  options: any;
+  preset: any;
+  restartTimes: any;
+  roomId: any;
+  startedAt: any;
+  status: any;
+  stderrTail: any;
+  stopReason: any;
+  stopping: any;
+  targets: any;
   /**
    * @param {object} options
    * @param {string} options.ffmpegBin
@@ -27,7 +54,7 @@ export class StreamRelay extends EventEmitter {
     audioBitrateKbps = 160,
     relayOptions = {},
     logger = console,
-  } = {}) {
+  }: any = {}) {
     super();
     this.ffmpegBin = ffmpegBin;
     this.roomId = roomId;
@@ -167,7 +194,7 @@ export class StreamRelay extends EventEmitter {
     const stdin = this.child?.stdin;
     if (!stdin || stdin.destroyed || !stdin.writable) return Promise.resolve();
     if (stdin.writableLength === 0) return Promise.resolve();
-    return new Promise((resolve) => {
+    return new Promise<void>((resolve) => {
       const done = () => {
         clearTimeout(timer);
         resolve();
@@ -232,7 +259,7 @@ export class StreamRelay extends EventEmitter {
   }
 
   /** Gracefully finalise the muxers so recordings stay playable. */
-  async stop({ reason = 'stopped' } = {}) {
+  async stop({ reason = 'stopped' }: any = {}) {
     this.stopping = true;
     this.stopReason = reason;
     if (this._liveTimer) {

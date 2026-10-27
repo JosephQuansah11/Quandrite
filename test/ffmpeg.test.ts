@@ -14,7 +14,7 @@ import {
   normalizeOnfail,
   parseDurationSeconds,
   parseLastTimeSeconds,
-} from '../server/ffmpeg.js';
+} from '../server/ffmpeg.ts';
 
 test('presets cover the resolutions a streamer needs', () => {
   assert.deepEqual(Object.keys(VIDEO_PRESETS), ['480p30', '720p30', '720p60', '1080p30', '1080p60']);

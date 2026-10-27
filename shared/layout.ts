@@ -19,7 +19,7 @@ export function gridColumnsFor(count) {
  * Rectangles for a tile grid, in output pixels.
  * @returns {Array<{index: number, x: number, y: number, w: number, h: number}>}
  */
-export function computeGridLayout(count, { width = 1280, height = 720, gap = 8, padding = 0 } = {}) {
+export function computeGridLayout(count, { width = 1280, height = 720, gap = 8, padding = 0 }: any = {}) {
   const n = Math.max(0, Math.floor(count));
   if (n === 0) return [];
   const cols = gridColumnsFor(n);
@@ -55,7 +55,7 @@ export function computeProgramLayout({
   width = 1280,
   height = 720,
   gap = 8,
-} = {}) {
+}: any = {}) {
   const count = Math.max(0, Math.floor(sourceCount));
   if (count === 0) return [];
   if (mode === 'grid') {
@@ -72,7 +72,7 @@ export function computeProgramLayout({
  * @param {object} params.program         `{ mode, sourceId, gridIds }`
  * @returns {Array<object>} the sources to composite, in order
  */
-export function resolveProgramSources({ sources = [], program = {} } = {}) {
+export function resolveProgramSources({ sources = [], program = {} }: any = {}) {
   const byId = new Map(sources.map((source) => [source.id, source]));
   const mode = program.mode || 'single';
 
@@ -80,7 +80,11 @@ export function resolveProgramSources({ sources = [], program = {} } = {}) {
     const ids = Array.isArray(program.gridIds) ? program.gridIds : [];
     const chosen = ids.map((id) => byId.get(id)).filter(Boolean);
     if (chosen.length) return chosen;
-    return sources.filter((source) => source.kind === 'camera' || source.kind === 'screen');
+    // Every camera and screen plus the participants who joined the call
+    // (`virtual` sources), which is exactly what the server's grid mode picks.
+    return sources.filter(
+      (source) => source.kind === 'camera' || source.kind === 'screen' || source.kind === 'virtual',
+    );
   }
 
   if (mode === 'screenshare') {

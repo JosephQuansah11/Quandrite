@@ -14,7 +14,29 @@ const DEFAULT_WIDTH = 1920;
 const DEFAULT_HEIGHT = 1080;
 
 export class ProgramCompositor {
-  constructor({ canvas, width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT, fps = 30 } = {}) {
+
+  // --- state (typed loosely while the class is migrated) ---
+  _audioNodes: any;
+  _images: any;
+  _lastFrame: any;
+  _music: any;
+  _rafId: any;
+  _running: any;
+  audioContext: any;
+  audioDestination: any;
+  badges: any;
+  canvas: any;
+  canvasStream: any;
+  ctx: any;
+  fps: any;
+  frameInterval: any;
+  height: any;
+  program: any;
+  scene: any;
+  sources: any;
+  videoTrack: any;
+  width: any;
+  constructor({ canvas, width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT, fps = 30 }: any = {}) {
     if (!canvas) throw new Error('ProgramCompositor needs a canvas');
     this.canvas = canvas;
     this.canvas.width = width;
@@ -54,7 +76,7 @@ export class ProgramCompositor {
     this._syncAudioGraph();
   }
 
-  setProgram(program = {}) {
+  setProgram(program: any = {}) {
     this.program = {
       mode: program.mode || 'single',
       sourceId: program.sourceId ?? null,
@@ -67,7 +89,7 @@ export class ProgramCompositor {
     this.scene = scene || null;
   }
 
-  setBadges(badges = {}) {
+  setBadges(badges: any = {}) {
     this.badges = { ...this.badges, ...badges };
   }
 
@@ -184,7 +206,7 @@ export class ProgramCompositor {
   }
 
   /** Route a music element (used by the Song scene) into the program audio. */
-  attachMusic(audioElement, { gain = 0.85 } = {}) {
+  attachMusic(audioElement, { gain = 0.85 }: any = {}) {
     const context = this._ensureAudio();
     if (!context || !audioElement) return false;
     this.detachMusic();

@@ -7,10 +7,17 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { Studio } from './studio.js';
+import { Studio } from './studio.ts';
 
 export class RoomRegistry {
-  constructor({ config, recordingStore = null, logger = console } = {}) {
+
+  // --- state (typed loosely while the class is migrated) ---
+  _sweeper: any;
+  config: any;
+  logger: any;
+  recordingStore: any;
+  rooms: any;
+  constructor({ config, recordingStore = null, logger = console }: any = {}) {
     this.config = config;
     this.recordingStore = recordingStore;
     this.logger = logger;
@@ -22,7 +29,7 @@ export class RoomRegistry {
     return randomUUID().slice(0, 8);
   }
 
-  create({ id, name, hostName } = {}) {
+  create({ id, name, hostName, hostPassword, cohostPassword, breakoutOf = null, breakoutIndex = null }: any = {}) {
     if (this.rooms.size >= (this.config?.maxRooms ?? 200)) {
       return { ok: false, error: 'the server has reached its room limit' };
     }
@@ -38,6 +45,17 @@ export class RoomRegistry {
       id: roomId,
       name: name || roomId,
       hostName: hostName || 'Host',
+      // Explicit passwords win; otherwise the operator's environment defaults
+      // apply, and a room without either generates its own.
+      hostPassword: hostPassword ?? this.config?.hostPassword,
+      cohostPassword: cohostPassword ?? this.config?.cohostPassword,
+      breakoutOf,
+      breakoutIndex,
+      // A parent room opens and closes its own breakout rooms.
+      breakoutRooms: {
+        create: (options) => this.createBreakout(options),
+        remove: (roomId) => this.delete(roomId),
+      },
       config: this.config,
       recordingStore: this.recordingStore,
       logger: this.logger,
@@ -47,7 +65,7 @@ export class RoomRegistry {
   }
 
   /** Get a room, creating it on demand when `createIfMissing` is true. */
-  get(id, { createIfMissing = false, name, hostName } = {}) {
+  get(id, { createIfMissing = false, name, hostName }: any = {}) {
     const roomId = String(id || '').trim().toLowerCase();
     if (!roomId) return null;
     const existing = this.rooms.get(roomId);
@@ -57,17 +75,35 @@ export class RoomRegistry {
     return created.ok ? created.studio : null;
   }
 
+  /**
+   * Open a breakout room for `parentId`.
+   *
+   * A breakout is a full room (its own chat and attendees) that the parent room
+   * owns: it is created on demand and removed again when the parent clears it.
+   */
+  createBreakout({ id, name, parentId, index }: any = {}) {
+    const created = this.create({ id, name, breakoutOf: parentId, breakoutIndex: index });
+    if (!created.ok) {
+      this.logger.warn?.(`could not open breakout room ${id}: ${created.error}`);
+      return null;
+    }
+    return created.studio;
+  }
+
   list() {
-    return [...this.rooms.values()].map((studio) => ({
-      id: studio.id,
-      name: studio.name,
-      createdAt: studio.createdAt,
-      members: studio.members.size,
-      sources: studio.sources.size,
-      destinations: studio.destinations.size,
-      streamStatus: studio.stream.status,
-      recordingStatus: studio.recording.status,
-    }));
+    return [...this.rooms.values()]
+      .filter((studio) => !studio.breakoutOf)
+      .map((studio) => ({
+        id: studio.id,
+        name: studio.name,
+        createdAt: studio.createdAt,
+        members: studio.members.size,
+        sources: studio.sources.size,
+        destinations: studio.destinations.size,
+        breakouts: studio.breakouts.size,
+        streamStatus: studio.stream.status,
+        recordingStatus: studio.recording.status,
+      }));
   }
 
   async delete(id) {
@@ -82,6 +118,8 @@ export class RoomRegistry {
   /** Heartbeat: refresh metrics and expire idle rooms. */
   tick() {
     for (const studio of this.rooms.values()) {
+      // Breakout rooms live and die with their parent room.
+      if (studio.breakoutOf) continue;
       if (studio.members.size === 0 && studio.stream.status === 'offline') {
         studio.emptySince = studio.emptySince ?? Date.now();
         if (Date.now() - studio.emptySince > (this.config?.emptyRoomTtlMs ?? 6 * 60 * 60 * 1000)) {

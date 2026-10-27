@@ -114,7 +114,7 @@ export function buildRelayArgs({
   targets = [],
   audioBitrateKbps = 160,
   keyframeSeconds = 2,
-} = {}) {
+}: any = {}) {
   const profile = getPreset(preset);
   const gop = Math.max(1, Math.round(profile.fps * keyframeSeconds));
   return [

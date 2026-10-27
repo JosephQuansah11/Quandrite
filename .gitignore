@@ -2,3 +2,6 @@ node_modules/
 recordings/
 *.log
 .env
+
+# TypeScript build output (npm run build)
+build/

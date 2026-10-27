@@ -9,7 +9,7 @@ import {
   overlayDrawModel,
   validateOverlay,
   wrapText,
-} from '../shared/overlays.js';
+} from '../shared/overlays.ts';
 
 test('every requested overlay type is supported', () => {
   assert.deepEqual(REQUESTABLE_OVERLAY_TYPES, [
@@ -93,11 +93,12 @@ test('createOverlay stamps ids and expiry times', () => {
     { now: 1_000_000, idFactory: () => 'scene-1' },
   );
   assert.equal(created.ok, true);
-  assert.equal(created.value.id, 'scene-1');
-  assert.equal(created.value.createdAt, 1_000_000);
-  assert.equal(created.value.expiresAt, 1_012_000);
+  const value: any = created.value;
+  assert.equal(value.id, 'scene-1');
+  assert.equal(value.createdAt, 1_000_000);
+  assert.equal(value.expiresAt, 1_012_000);
 
-  const persistent = createOverlay({ type: 'break', payload: {} }, { now: 5, idFactory: () => 'scene-2' });
+  const persistent: any = createOverlay({ type: 'break', payload: {} }, { now: 5, idFactory: () => 'scene-2' });
   assert.equal(persistent.value.expiresAt, null);
 });
 

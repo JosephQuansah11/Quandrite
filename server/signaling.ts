@@ -8,15 +8,36 @@
 
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { CLIENT, SERVER, PROTOCOL_VERSION, canControlBroadcast, validateEnvelope } from '../shared/protocol.js';
-import { OVERLAY_DEFINITIONS, REQUESTABLE_OVERLAY_TYPES } from '../shared/overlays.js';
-import { listPlatforms } from '../shared/destinations.js';
+import { CLIENT, SERVER, PROTOCOL_VERSION, canControlBroadcast, validateEnvelope } from '../shared/protocol.ts';
+import { OVERLAY_DEFINITIONS, REQUESTABLE_OVERLAY_TYPES } from '../shared/overlays.ts';
+import { listPlatforms } from '../shared/destinations.ts';
 
 export class SignalingServer {
-  constructor({ server, registry, config, logger = console, path = '/ws' } = {}) {
+
+  // --- state (typed loosely while the class is migrated) ---
+  _heartbeat: any;
+  config: any;
+  logger: any;
+  registry: any;
+  roomClients: any;
+  sessions: any;
+  wss: any;
+  mailer: any;
+  recordingStore: any;
+  constructor({
+    server,
+    registry,
+    config,
+    logger = console,
+    path = '/ws',
+    mailer = null,
+    recordingStore = null,
+  }: any = {}) {
     this.registry = registry;
     this.config = config;
     this.logger = logger;
+    this.mailer = mailer;
+    this.recordingStore = recordingStore;
     this.sessions = new Map();
     this.roomClients = new Map();
 
@@ -37,6 +58,8 @@ export class SignalingServer {
       name: 'Guest',
       role: 'viewer',
       studio: null,
+      attendedRoomId: null,
+      breakoutId: null,
       remote: request?.socket?.remoteAddress || null,
       chunks: 0,
     };
@@ -80,6 +103,8 @@ export class SignalingServer {
       sceneTypes: REQUESTABLE_OVERLAY_TYPES,
       overlayDefinitions: OVERLAY_DEFINITIONS,
       platforms: listPlatforms(),
+      // Whether the host password can be mailed from here.
+      mail: { enabled: Boolean(this.mailer?.enabled), from: this.mailer?.from || null },
     });
   }
 
@@ -87,27 +112,165 @@ export class SignalingServer {
     this.sessions.delete(session.id);
     const studio = session.studio;
     if (!studio) return;
-    const clients = this.roomClients.get(studio.id);
-    if (clients) {
-      clients.delete(session.id);
-      if (clients.size === 0) this.roomClients.delete(studio.id);
-    }
+    this._dropFromRoom(session);
     studio.leave(session.id);
   }
 
+  /** Remove a session from whichever room it is currently attending. */
+  _dropFromRoom(session) {
+    const roomId = session.attendedRoomId || session.studio?.id;
+    if (!roomId) return;
+    const clients = this.roomClients.get(roomId);
+    if (!clients) return;
+    clients.delete(session.id);
+    if (clients.size === 0) this.roomClients.delete(roomId);
+  }
+
+  /**
+   * Bind a room's events to the wire.
+   *
+   * A parent room broadcasts its studio state and its roster to the whole tree
+   * (itself plus every breakout room); a breakout room only carries its own
+   * chat, because the parent still owns the program and the roster.
+   */
   _attachRoom(studio) {
     if (studio.__quandriteBound) return;
     studio.__quandriteBound = true;
     const emit = (type, payload) => this._broadcast(studio.id, { type, payload });
+
+    if (studio.isBreakout) {
+      studio.on('chat', (message) => emit(SERVER.CHAT_NEW, message));
+      return;
+    }
+
+    const tree = (type, payload) => this._broadcastTree(studio.id, { type, payload });
     studio.on('chat', (message) => emit(SERVER.CHAT_NEW, message));
-    studio.on('members', (members) => emit(SERVER.MEMBERS_UPDATE, members));
-    studio.on('sources', (sources) => emit(SERVER.SOURCES_UPDATE, sources));
-    studio.on('program', (program) => emit(SERVER.PROGRAM_UPDATE, program));
-    studio.on('scene', (scene) => emit(SERVER.SCENE_UPDATE, scene));
-    studio.on('destinations', (destinations) => emit(SERVER.DESTINATIONS_UPDATE, destinations));
-    studio.on('stream', (stream) => emit(SERVER.STREAM_UPDATE, stream));
-    studio.on('recording', (recording) => emit(SERVER.RECORDING_UPDATE, recording));
-    studio.on('log', (entry) => emit(SERVER.RELAY_LOG, entry));
+    studio.on('members', (members) => tree(SERVER.MEMBERS_UPDATE, members));
+    studio.on('breakouts', (state) => {
+      tree(SERVER.BREAKOUTS_UPDATE, state);
+      // Opening, closing, reassigning or the timer expiring all land here, so
+      // this is where attendees are moved between rooms.
+      this._syncBreakoutSessions(studio);
+    });
+    studio.on('sources', (sources) => tree(SERVER.SOURCES_UPDATE, sources));
+    studio.on('program', (program) => tree(SERVER.PROGRAM_UPDATE, program));
+    studio.on('scene', (scene) => tree(SERVER.SCENE_UPDATE, scene));
+    studio.on('destinations', (destinations) => tree(SERVER.DESTINATIONS_UPDATE, destinations));
+    studio.on('stream', (stream) => tree(SERVER.STREAM_UPDATE, stream));
+    studio.on('recording', (recording) => {
+      tree(SERVER.RECORDING_UPDATE, recording);
+      // The library is pushed as soon as a recording is finished, so the tab
+      // never needs a refresh.
+      if (recording?.status === 'ready' || recording?.status === 'error') {
+        this.broadcastRecordings(studio.id).catch(() => {});
+      }
+    });
+    studio.on('log', (entry) => tree(SERVER.RELAY_LOG, entry));
+  }
+
+  /** Send to a parent room and every breakout room it owns. */
+  _broadcastTree(roomId, message) {
+    this._broadcast(roomId, message);
+    const studio = this.registry.get(roomId);
+    if (!studio) return;
+    for (const breakout of studio.breakouts.values()) this._broadcast(breakout.id, message);
+  }
+
+  /** Push a room's recording library so the Library tab is always current. */
+  async broadcastRecordings(roomId) {
+    if (!this.recordingStore) return;
+    await this.recordingStore.load();
+    const recordings = this.recordingStore
+      .list({ roomId })
+      .map((entry) => this.recordingStore.toPublic(entry));
+    this._broadcastTree(roomId, { type: SERVER.RECORDINGS_UPDATE, payload: { roomId, recordings } });
+  }
+
+  // --------------------------------------------------------------- breakouts
+
+  /** Attach the chat of every breakout room the parent owns. */
+  _attachBreakouts(studio) {
+    for (const breakout of studio.breakouts.values()) {
+      const room = this.registry.get(breakout.id);
+      if (room) this._attachRoom(room);
+    }
+  }
+
+  /**
+   * The room a session should be in: its member's open breakout, or the main
+   * room. Assignments survive a close, so reopening puts people back.
+   */
+  _desiredRoomId(session) {
+    const studio = session.studio;
+    if (!studio) return null;
+    const member = studio.getMember(session.id);
+    const breakout = member?.breakoutId ? studio.breakouts.get(member.breakoutId) : null;
+    return breakout?.open ? breakout.id : studio.id;
+  }
+
+  /**
+   * Move sessions between the main room and the breakouts.
+   *
+   * Called after any breakout change (create, assign, open, close, clear, timer)
+   * so attendees follow their assignment without re-joining.
+   */
+  _syncBreakoutSessions(studio) {
+    for (const session of this.sessions.values()) {
+      if (session.studio !== studio) continue;
+      const roomId = this._desiredRoomId(session);
+      if (!roomId) continue;
+      if ((session.attendedRoomId || studio.id) === roomId) continue;
+      this._moveSession(session, roomId);
+    }
+  }
+
+  /**
+   * Move one session into `roomId` (the main room or a breakout) and hand it
+   * everything it needs to carry on: the roster, the breakout catalogue, the
+   * chat of the room it just walked into and the studio state.
+   */
+  _moveSession(session, roomId) {
+    const studio = session.studio;
+    this._dropFromRoom(session);
+    if (!this.roomClients.has(roomId)) this.roomClients.set(roomId, new Set());
+    this.roomClients.get(roomId).add(session.id);
+
+    const target = roomId === studio.id ? studio : this.registry.get(roomId);
+    if (target && target !== studio) this._attachRoom(target);
+    const previousRoomId = session.attendedRoomId;
+    session.attendedRoomId = roomId;
+    session.breakoutId = roomId === studio.id ? null : roomId;
+
+    const chatRoom = target || studio;
+    // The room you walk into sees you arrive, so a breakout is never silent.
+    if (chatRoom !== studio) {
+      chatRoom.addChat({
+        authorId: 'system',
+        authorName: 'Quandrite',
+        kind: 'system',
+        text: `${session.name} joined the room`,
+      });
+    } else if (previousRoomId && previousRoomId !== roomId) {
+      const previous = this.registry.get(previousRoomId);
+      previous?.addChat({
+        authorId: 'system',
+        authorName: 'Quandrite',
+        kind: 'system',
+        text: `${session.name} left the room`,
+      });
+    }
+
+    this._send(session, {
+      type: SERVER.BREAKOUT_UPDATE,
+      payload: {
+        breakoutId: session.breakoutId,
+        breakouts: studio.breakoutsSnapshot(),
+        members: studio.membersSnapshot(),
+        // The studio state always comes from the parent; the chat comes from
+        // the room the session just walked into.
+        state: { ...studio.snapshot(), chat: chatRoom.chat.slice(-100) },
+      },
+    });
   }
 
   _broadcast(roomId, message) {
@@ -143,11 +306,31 @@ export class SignalingServer {
   }
 
   _requireControl(session, id) {
-    if (!canControlBroadcast(session.role)) {
+    // Always trust the studio's copy of the role: the host can grant or revoke
+    // co-host mid-session, so the session's snapshot of it goes stale.
+    const role = session.studio?.getMember(session.id)?.role ?? session.role;
+    if (!canControlBroadcast(role)) {
       this._fail(session, id, 'only the host or a co-host can control the broadcast');
       return false;
     }
     return true;
+  }
+
+  _requireHost(session, id) {
+    if (!session.studio?.isHost(session.id)) {
+      this._fail(session, id, 'only the host can do that');
+      return false;
+    }
+    return true;
+  }
+
+  /** The room a session's chat belongs to: its breakout, or the main room. */
+  _chatRoomFor(session) {
+    if (!session.breakoutId) return session.studio;
+    const room = this.registry.get(session.breakoutId);
+    if (!room) return session.studio;
+    this._attachRoom(room);
+    return room;
   }
 
   async _handleJoin(session, message, id) {
@@ -160,17 +343,40 @@ export class SignalingServer {
       hostName: message.name,
     });
     if (!studio) return this._fail(session, id, `room ${roomId} is not available`);
+    if (studio.isBreakout) {
+      return this._fail(session, id, 'breakout rooms are entered from their parent room');
+    }
+
+    // Claim the seat before joining the room so a wrong password changes nothing.
+    const existing = studio.getMember(session.id);
+    const claim = existing
+      ? studio.claimRole(session.id, { role: message.role, password: message.password })
+      : studio.resolveRole({
+          role: message.role,
+          password: message.password,
+          isFirst: studio.members.size === 0 && !studio.hostId,
+        });
+    if (!claim.ok) return this._fail(session, id, claim.error);
 
     if (session.studio && session.studio !== studio) {
-      this.roomClients.get(session.studio.id)?.delete(session.id);
+      this._dropFromRoom(session);
       session.studio.leave(session.id);
     }
 
     this._attachRoom(studio);
     if (!this.roomClients.has(studio.id)) this.roomClients.set(studio.id, new Set());
     this.roomClients.get(studio.id).add(session.id);
+    session.attendedRoomId = studio.id;
+    session.breakoutId = null;
 
-    const member = studio.join({ clientId: session.id, name: message.name, role: message.role });
+    const member = existing
+      ? studio.getMember(session.id)
+      : studio.join({
+          clientId: session.id,
+          name: message.name,
+          role: message.role,
+          password: message.password,
+        });
     session.studio = studio;
     session.roomId = studio.id;
     session.role = member.role;
@@ -181,8 +387,13 @@ export class SignalingServer {
       clientId: session.id,
       name: member.name,
       role: member.role,
+      // Only the host may see the passwords, so they can share them.
+      credentials: studio.isHost(session.id) ? studio.credentialsSnapshot() : null,
       snapshot: studio.snapshot(),
     });
+
+    // A member who reconnects into an open breakout room goes back there.
+    this._syncBreakoutSessions(studio);
     return undefined;
   }
 
@@ -244,7 +455,7 @@ export class SignalingServer {
     }
     this.sessions.clear();
     this.roomClients.clear();
-    await new Promise((resolve) => this.wss.close(() => resolve()));
+    await new Promise<void>((resolve) => this.wss.close(() => resolve()));
   }
 
   async _handle(session, raw) {
@@ -261,11 +472,13 @@ export class SignalingServer {
         return this._handleJoin(session, message, id);
       case CLIENT.LEAVE: {
         if (session.studio) {
-          this.roomClients.get(session.studio.id)?.delete(session.id);
+          this._dropFromRoom(session);
           session.studio.leave(session.id);
         }
         session.studio = null;
         session.roomId = null;
+        session.attendedRoomId = null;
+        session.breakoutId = null;
         this._ack(session, id, { left: true });
         return undefined;
       }
@@ -274,7 +487,9 @@ export class SignalingServer {
         return undefined;
       case CLIENT.CHAT_SEND: {
         if (!this._requireRoom(session, id)) return undefined;
-        const posted = session.studio.addChat({
+        // Chat belongs to the room the session is actually in: a breakout has
+        // its own conversation.
+        const posted = this._chatRoomFor(session).addChat({
           authorId: session.id,
           authorName: session.name,
           text: message.text,
@@ -283,13 +498,157 @@ export class SignalingServer {
         this._ack(session, id, { chatId: posted.id });
         return undefined;
       }
+      case CLIENT.BREAKOUT_CREATE: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
+        const result = session.studio.createBreakouts({
+          count: message.count,
+          labels: Array.isArray(message.labels) ? message.labels : [],
+          assignments: message.assignments || null,
+        });
+        if (!result.ok) return this._fail(session, id, result.error);
+        this._attachBreakouts(session.studio);
+        this._syncBreakoutSessions(session.studio);
+        this._ack(session, id, { breakouts: result.breakouts });
+        return undefined;
+      }
+      case CLIENT.BREAKOUT_ASSIGN: {
+        if (!this._requireRoom(session, id)) return undefined;
+        const memberId = message.memberId || session.id;
+        const movingSelf = memberId === session.id;
+        if (movingSelf) {
+          // Anyone may join the breakout they are assigned to, or come home.
+          const breakoutId = message.breakoutId ?? null;
+          if (breakoutId && !session.studio.breakouts.get(breakoutId)?.open) {
+            return this._fail(session, id, 'that breakout room is not open yet');
+          }
+        } else if (!this._requireControl(session, id)) {
+          return undefined;
+        }
+
+        const result = session.studio.assignBreakout(memberId, message.breakoutId ?? null);
+        if (!result.ok) return this._fail(session, id, result.error);
+        this._syncBreakoutSessions(session.studio);
+        this._ack(session, id, { member: result.member, breakouts: session.studio.breakoutsSnapshot() });
+        return undefined;
+      }
+      case CLIENT.BREAKOUT_SHUFFLE: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
+        const result = session.studio.autoAssignBreakouts(message.assignments || null);
+        if (!result.ok) return this._fail(session, id, result.error);
+        this._syncBreakoutSessions(session.studio);
+        this._ack(session, id, { breakouts: result.breakouts });
+        return undefined;
+      }
+      case CLIENT.BREAKOUT_OPEN: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
+        const result = session.studio.setBreakoutsOpen(true, {
+          breakoutId: message.breakoutId || null,
+          durationMs: Number(message.durationMs) || 0,
+        });
+        if (!result.ok) return this._fail(session, id, result.error);
+        this._attachBreakouts(session.studio);
+        this._syncBreakoutSessions(session.studio);
+        this._ack(session, id, { breakouts: result.breakouts });
+        return undefined;
+      }
+      case CLIENT.BREAKOUT_CLOSE: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
+        const result = session.studio.setBreakoutsOpen(false, { breakoutId: message.breakoutId || null });
+        if (!result.ok) return this._fail(session, id, result.error);
+        this._syncBreakoutSessions(session.studio);
+        this._ack(session, id, { breakouts: result.breakouts });
+        return undefined;
+      }
+      case CLIENT.BREAKOUT_CLEAR: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
+        const result = await session.studio.clearBreakouts();
+        this._syncBreakoutSessions(session.studio);
+        this._ack(session, id, { breakouts: session.studio.breakoutsSnapshot(), removed: result.removed });
+        return undefined;
+      }
+      case CLIENT.BREAKOUT_ANNOUNCE: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
+        const text = String(message.text ?? '').trim();
+        if (!text) return this._fail(session, id, 'the announcement is empty');
+
+        const studio = session.studio;
+        const rooms = [studio, ...[...studio.breakouts.keys()].map((id) => this.registry.get(id)).filter(Boolean)];
+        let delivered = 0;
+        for (const room of rooms) {
+          const posted = room.addChat({
+            authorId: 'system',
+            authorName: session.name,
+            kind: 'system',
+            text: `Announcement: ${text}`,
+          });
+          if (posted) delivered += 1;
+        }
+        this._ack(session, id, { delivered });
+        return undefined;
+      }
       case CLIENT.MEMBER_UPDATE: {
         if (!this._requireRoom(session, id)) return undefined;
         session.studio.updateMember(session.id, message.patch || {});
         this._ack(session, id, { updated: true });
         return undefined;
       }
+      case CLIENT.MEMBER_ROLE: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireHost(session, id)) return undefined;
+        const result = session.studio.setMemberRole(session.id, message.memberId, message.role);
+        if (!result.ok) return this._fail(session, id, result.error);
+        this._ack(session, id, { member: result.member });
+        return undefined;
+      }
+      case CLIENT.ROOM_UPDATE: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireHost(session, id)) return undefined;
+        const result = session.studio.updateCredentials(session.id, {
+          hostPassword: message.hostPassword,
+          cohostPassword: message.cohostPassword,
+        });
+        if (!result.ok) return this._fail(session, id, result.errors?.join('; ') || result.error);
+        this._ack(session, id, { credentials: result.credentials });
+        return undefined;
+      }
+      case CLIENT.MEMBER_MEDIA: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
+        const patch: any = {};
+        if (message.muted !== undefined) patch.muted = Boolean(message.muted);
+        if (message.cameraEnabled !== undefined) patch.cameraEnabled = Boolean(message.cameraEnabled);
+        if (!Object.keys(patch).length) return this._fail(session, id, 'nothing to change');
+
+        // `all: true` is one message for "mute everyone" / "stop every video".
+        const targets = message.all
+          ? [...session.studio.members.keys()].filter((memberId) => memberId !== session.id)
+          : [message.memberId];
+        if (!targets.length || !targets[0]) return this._fail(session, id, 'memberId is required');
+
+        let changed = 0;
+        for (const memberId of targets) {
+          const member = session.studio.updateMember(memberId, patch);
+          if (!member) continue;
+          changed += 1;
+          // Tell the member's own client so it really turns the track off.
+          const target = this.sessions.get(memberId);
+          if (target && target.studio === session.studio) {
+            this._send(target, { type: SERVER.MEMBER_MEDIA, byName: session.name, ...patch });
+          }
+        }
+        if (!changed) return this._fail(session, id, 'member not found');
+        this._ack(session, id, { changed });
+        return undefined;
+      }
       case CLIENT.SOURCE_ADD: {
+        // Anyone may publish their own camera or screen; the program stays with
+        // the host and co-hosts.
         if (!this._requireRoom(session, id)) return undefined;
         const result = session.studio.addSource({ ...(message.source || {}), ownerId: session.id });
         if (!result.ok) return this._fail(session, id, result.error);

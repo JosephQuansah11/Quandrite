@@ -23,7 +23,13 @@ function friendlyLabel(device, index, kind) {
 }
 
 export class CameraManager extends EventTarget {
-  constructor({ socket, logger = console } = {}) {
+
+  // --- state (typed loosely while the class is migrated) ---
+  devices: any;
+  logger: any;
+  socket: any;
+  sources: any;
+  constructor({ socket, logger = console }: any = {}) {
     super();
     this.socket = socket;
     this.logger = logger;
@@ -71,7 +77,18 @@ export class CameraManager extends EventTarget {
     return camera?.stream || null;
   }
 
-  async _registerSource({ id, kind, label, deviceId = null, groupId = null, stream, meta = {} }) {
+  async _registerSource({
+    id,
+    kind,
+    label,
+    deviceId = null,
+    groupId = null,
+    stream,
+    meta = {},
+    announce = true,
+    stopTracksOnRemove = true,
+    quiet = false,
+  }) {
     const video = document.createElement('video');
     video.autoplay = true;
     video.muted = true;
@@ -84,15 +101,34 @@ export class CameraManager extends EventTarget {
       // autoplay can be blocked until the first user gesture; the tile still renders
     }
 
-    const source = { id, kind, label, deviceId, groupId, stream, video, meta, addedAt: Date.now() };
+    const source = {
+      id,
+      kind,
+      label,
+      deviceId,
+      groupId,
+      stream,
+      video,
+      meta,
+      addedAt: Date.now(),
+      announced: Boolean(announce),
+      stopTracksOnRemove,
+    };
     this.sources.set(id, source);
 
-    try {
-      await this.socket.send(CLIENT.SOURCE_ADD, {
-        source: { id, kind, label, deviceId, groupId, meta },
-      });
-    } catch (error) {
-      this._emit('warning', { message: `could not announce source: ${error.message}` });
+    // Meeting-only media (a viewer's camera) is kept local: the server only
+    // accepts program sources from the host and co-hosts.
+    if (announce) {
+      try {
+        await this.socket.send(CLIENT.SOURCE_ADD, {
+          source: { id, kind, label, deviceId, groupId, meta },
+        });
+      } catch (error) {
+        // Someone else already announced it (two hosts can see the same peer),
+        // so leave the removal to them.
+        source.announced = false;
+        if (!quiet) this._emit('warning', { message: `could not announce source: ${error.message}` });
+      }
     }
 
     this._emit('change', this.list());
@@ -101,9 +137,9 @@ export class CameraManager extends EventTarget {
 
   /**
    * Attach one camera (plus its microphone when available) to the studio.
-   * @param {{deviceId?: string|null, label?: string, withAudio?: boolean}} options
+   * @param {{deviceId?: string|null, label?: string, withAudio?: boolean, announce?: boolean}} options
    */
-  async addCamera({ deviceId = null, label = null, withAudio = true } = {}) {
+  async addCamera({ deviceId = null, label = null, withAudio = true, announce = true }: any = {}) {
     if (!this.mediaDevicesSupported) {
       this._emit('warning', { message: 'this browser does not support camera capture' });
       return null;
@@ -155,6 +191,7 @@ export class CameraManager extends EventTarget {
       deviceId: resolvedDeviceId,
       groupId: device?.groupId || null,
       stream,
+      announce,
       meta: {
         width: settings.width || null,
         height: settings.height || null,
@@ -181,7 +218,7 @@ export class CameraManager extends EventTarget {
   }
 
   /** Share a screen (optionally with system/tab audio) as a source. */
-  async addScreenShare({ audio = true } = {}) {
+  async addScreenShare({ audio = true }: any = {}) {
     if (!navigator.mediaDevices?.getDisplayMedia) {
       this._emit('error', { message: 'this browser cannot share a screen' });
       return null;
@@ -223,7 +260,7 @@ export class CameraManager extends EventTarget {
   }
 
   /** Attach a microphone as an audio-only source (used for program audio). */
-  async addMicrophone({ deviceId = null, label = null } = {}) {
+  async addMicrophone({ deviceId = null, label = null }: any = {}) {
     if (!this.mediaDevicesSupported) return null;
     let stream;
     try {
@@ -247,30 +284,75 @@ export class CameraManager extends EventTarget {
     const source = this.sources.get(id);
     if (!source) return false;
     this.sources.delete(id);
-    for (const track of source.stream?.getTracks?.() || []) {
-      try {
-        track.stop();
-      } catch {
-        // already stopped
+    // Remote feeds belong to the peer connection: never stop their tracks here.
+    if (source.stopTracksOnRemove !== false) {
+      for (const track of source.stream?.getTracks?.() || []) {
+        try {
+          track.stop();
+        } catch {
+          // already stopped
+        }
       }
     }
     if (source.video) source.video.srcObject = null;
-    try {
-      await this.socket.send(CLIENT.SOURCE_REMOVE, { sourceId: id });
-    } catch (error) {
-      this._emit('warning', { message: `could not remove source on the server: ${error.message}` });
+    if (source.announced) {
+      try {
+        await this.socket.send(CLIENT.SOURCE_REMOVE, { sourceId: id });
+      } catch (error) {
+        this._emit('warning', { message: `could not remove source on the server: ${error.message}` });
+      }
     }
     this._emit('change', this.list());
     return true;
   }
 
+  /**
+   * Attach a participant's live video, which arrives over the meeting mesh, as a
+   * program source. Everyone sees it in the room; the host and co-hosts also
+   * announce it so it can be composited into the program and put on air.
+   */
+  async addParticipant({ peerId, label = null, stream, announce = true }) {
+    if (!peerId || !stream) return null;
+    const id = `participant:${peerId}`;
+    const existing = this.sources.get(id);
+    if (existing) {
+      // A newer track set replaces the old one without a second announcement.
+      existing.stream = stream;
+      if (existing.video) existing.video.srcObject = stream;
+      this._emit('change', this.list());
+      return existing;
+    }
+    return this._registerSource({
+      id,
+      kind: 'virtual',
+      label: label || 'Participant',
+      stream,
+      meta: { peerId },
+      announce,
+      stopTracksOnRemove: false,
+      quiet: true,
+    });
+  }
+
+  /** Detach a participant feed (the mesh owns its tracks). */
+  removeParticipant(peerId) {
+    return this.removeSource(`participant:${peerId}`);
+  }
+
+  /** Participant feeds currently attached, in join order. */
+  participants() {
+    return this.list().filter((source) => source.kind === 'virtual');
+  }
+
   stopAll() {
     for (const [id, source] of this.sources) {
-      for (const track of source.stream?.getTracks?.() || []) {
-        try {
-          track.stop();
-        } catch {
-          // ignore
+      if (source.stopTracksOnRemove !== false) {
+        for (const track of source.stream?.getTracks?.() || []) {
+          try {
+            track.stop();
+          } catch {
+            // ignore
+          }
         }
       }
       this.sources.delete(id);
@@ -282,8 +364,8 @@ export class CameraManager extends EventTarget {
    * Help the operator pair a Bluetooth camera.
    *
    * Browsers cannot open a video stream straight off a BLE device, so this
-   * triggers the pairing flow and then re-enumerates: once the OS exposes the
-   * newly paired camera as a video input it is added automatically.
+   * triggers the pairing flow and then waits for the OS to expose the newly
+   * paired camera as a video input before attaching it.
    */
   async pairBluetooth() {
     if (!navigator.bluetooth?.requestDevice) {
@@ -296,12 +378,37 @@ export class CameraManager extends EventTarget {
     try {
       const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true });
       this._emit('bluetooth', { name: device.name || 'Bluetooth device', id: device.id });
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      const added = await this.addAllCameras();
+      const added = await this._attachNewCameras();
       return { ok: true, name: device.name, added: added.length };
     } catch (error) {
       return { ok: false, reason: error.message };
     }
+  }
+
+  /**
+   * Re-enumerate until a newly paired camera shows up, then attach it.
+   *
+   * A camera that appears over Bluetooth can take a moment before the operating
+   * system lists it as a video input, so this polls instead of sampling once.
+   */
+  async _attachNewCameras({ attempts = 8, delayMs = 750 }: any = {}) {
+    const known = new Set((await this.enumerate()).video.map((device) => device.deviceId));
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      const devices = await this.enumerate();
+      const fresh = devices.video.filter(
+        (device) => !known.has(device.deviceId) && !this.sources.has(`camera:${device.deviceId}`),
+      );
+      if (fresh.length) {
+        const added = [];
+        for (const device of fresh) {
+          const source = await this.addCamera({ deviceId: device.deviceId });
+          if (source) added.push(source);
+        }
+        return added;
+      }
+    }
+    return [];
   }
 }
 

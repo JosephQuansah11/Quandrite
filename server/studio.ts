@@ -3,38 +3,123 @@
  *
  * It owns members, chat, the pool of media sources (multiple cameras, screen
  * shares, audio), which source(s) are on the program output, the current
- * overlay scene, the platform destinations, the outbound relay and the
- * recording. Every mutation emits a granular event that the signalling layer
+ * overlay scene, the platform destinations, the outbound relay, the recording
+ * and - for a parent room - its breakout rooms. Every mutation emits a granular
+ * event that the signalling layer
  * fans out to connected clients.
  */
 
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { createOverlay, OVERLAY_DEFINITIONS } from '../shared/overlays.js';
-import { redactDestination, validateDestination } from '../shared/destinations.js';
-import { PROGRAM_MODES, SOURCE_KINDS } from '../shared/protocol.js';
-import { resolveProgramSources } from '../shared/layout.js';
-import { listPresets } from './ffmpeg.js';
-import { StreamRelay } from './relay.js';
+import { createOverlay, OVERLAY_DEFINITIONS } from '../shared/overlays.ts';
+import { redactDestination, validateDestination } from '../shared/destinations.ts';
+import {
+  MAX_BREAKOUTS,
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  PROGRAM_MODES,
+  SOURCE_KINDS,
+  SOURCE_REQUESTS,
+  canControlBroadcast,
+  isPasswordValid,
+  isPassiveRole,
+  isRole,
+  normalizeRole,
+} from '../shared/protocol.ts';
+import { resolveProgramSources } from '../shared/layout.ts';
+import { listPresets } from './ffmpeg.ts';
+import { StreamRelay } from './relay.ts';
+import type {
+  BreakoutRoomAdapter,
+  ChatMessage,
+  Member,
+  Program,
+  RecordingSnapshot,
+  Source,
+  StudioCredentials,
+} from '../shared/protocol.ts';
 
 const MAX_CHAT_LENGTH = 2000;
 const MAX_MEMBER_NAME = 48;
 const MAX_SOURCE_LABEL = 64;
+const MAX_BREAKOUT_LABEL = 48;
 
 function cleanText(value, max) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+/** Trim and bound a room password; empty becomes null (not configured). */
+function cleanSecret(value) {
+  const secret = String(value ?? '').slice(0, MAX_PASSWORD_LENGTH);
+  return secret.length ? secret : null;
+}
+
+/** A readable shared secret for a room that has no configured password. */
+function makePassword() {
+  return randomUUID().replace(/-/g, '').slice(0, 8);
+}
+
+export interface StudioOptions {
+  id: string;
+  name?: string;
+  hostName?: string;
+  hostPassword?: string | null;
+  cohostPassword?: string | null;
+  breakoutOf?: string | null;
+  breakoutIndex?: number | null;
+  breakoutRooms?: BreakoutRoomAdapter | null;
+  config?: any;
+  recordingStore?: any;
+  relayFactory?: any;
+  logger?: any;
+}
+
 export class Studio extends EventEmitter {
+  id: string;
+  name: string;
+  config: any;
+  recordingStore: any;
+  relayFactory: any;
+  logger: any;
+  createdAt: number;
+  members: Map<string, Member>;
+  chat: ChatMessage[];
+  sources: Map<string, Source>;
+  destinations: Map<string, any>;
+  program: Program;
+  scene: any;
+  stream: any;
+  recording: RecordingSnapshot;
+  relay: any;
+  hostId: string | null;
+  hostName: string;
+  breakoutOf: string | null;
+  breakoutRooms: BreakoutRoomAdapter | null;
+  breakouts: Map<string, any>;
+  breakoutSession: any;
+  credentials: StudioCredentials;
+  hostPasswordRequired: boolean;
+  emptySince?: number | null;
+  _hostClaimed: boolean;
+  _sceneTimer: any;
+  _sceneRestore: any;
+  _breakoutTimer: any;
+  _finalizePromise: any;
+  _reconfigureChain: any;
+
   constructor({
     id,
     name,
     hostName = 'Host',
+    hostPassword = null,
+    cohostPassword = null,
+    breakoutOf = null,
+    breakoutRooms = null,
     config,
     recordingStore = null,
     relayFactory = null,
     logger = console,
-  }) {
+  }: StudioOptions) {
     super();
     this.id = id;
     this.name = cleanText(name, 80) || id;
@@ -82,16 +167,89 @@ export class Studio extends EventEmitter {
     };
     this.hostId = null;
     this.hostName = cleanText(hostName, MAX_MEMBER_NAME) || 'Host';
+
+    // Breakout rooms: a parent splits itself into child rooms (each a Studio of
+    // its own, so chat and the meeting work) and tracks who is where.
+    this.breakoutOf = breakoutOf ? String(breakoutOf) : null;
+    this.breakoutRooms = breakoutRooms;
+    this.breakouts = new Map();
+    this.breakoutSession = null;
+    this._breakoutTimer = null;
+
+    // Role passwords. An operator can configure them per room (or through the
+    // environment); otherwise the room generates its own and reveals them to
+    // whoever ends up as host so they can be shared with co-hosts.
+    const configuredHostPassword = cleanSecret(hostPassword);
+    const configuredCohostPassword = cleanSecret(cohostPassword);
+    this.credentials = {
+      hostPassword: configuredHostPassword || makePassword(),
+      cohostPassword: configuredCohostPassword || makePassword(),
+    };
+    // When the operator set a host password it is enforced from the very first
+    // join; a generated one lets the room bootstrap a host first.
+    this.hostPasswordRequired = Boolean(configuredHostPassword);
+    this._hostClaimed = false;
   }
 
   // ---------------------------------------------------------------- members
 
-  join({ clientId, name, role } = {}) {
+  /**
+   * Decide which role a joiner ends up with.
+   *
+   * - `host` is a single seat: it needs the host password, and only one person
+   *   holds it at a time (the host hands it over with `setMemberRole`).
+   * - `cohost` can be claimed by anyone holding the co-host password - several
+   *   people at once - or granted by the host without any password.
+   * - `viewer` / `visitor` never need a password and never drive the broadcast.
+   *
+   * @returns {{ok: true, role: string} | {ok: false, error: string}}
+   */
+  resolveRole({ role = null, password = null, isFirst = false }: any = {}) {
+    const requested = isRole(role) ? role : null;
+
+    // Bootstrap: the first person in a room with no operator-set password takes
+    // the host seat, so a room that was opened on demand is never left without
+    // an owner. From then on the seat needs the host password.
+    if (isFirst && !this._hostClaimed && !this.hostPasswordRequired) return { ok: true, role: 'host' };
+
+    if (requested === 'host') {
+      // The password is the stronger claim: it always wins, so a host that
+      // reconnects takes the seat back from whoever was handed it meanwhile.
+      if (this.passwordMatches(password, this.credentials.hostPassword)) {
+        return { ok: true, role: 'host' };
+      }
+      if (this.hostId) {
+        return { ok: false, error: 'this room already has a host - ask them to hand the role over' };
+      }
+      return { ok: false, error: 'the host password is not correct' };
+    }
+
+    if (requested === 'cohost') {
+      if (!this.passwordMatches(password, this.credentials.cohostPassword)) {
+        return { ok: false, error: 'the co-host password is not correct - the host can also promote you' };
+      }
+      return { ok: true, role: 'cohost' };
+    }
+
+    if (requested) return { ok: true, role: requested };
+
+    // No role requested in a room that already has an owner: just watch.
+    return { ok: true, role: 'viewer' };
+  }
+
+  passwordMatches(supplied, expected) {
+    if (!expected) return false;
+    return typeof supplied === 'string' && supplied.length > 0 && supplied === expected;
+  }
+
+  join({ clientId, name, role, password = null }: any = {}) {
     if (!clientId) throw new Error('clientId is required');
     const isFirst = this.members.size === 0 && !this.hostId;
+    const claim = this.resolveRole({ role, password, isFirst });
+    if (!claim.ok) throw new Error(claim.error);
+
     const memberName = cleanText(name, MAX_MEMBER_NAME) || (isFirst ? this.hostName : 'Guest');
-    const requested = ['host', 'cohost', 'viewer'].includes(role) ? role : null;
-    const effectiveRole = isFirst ? 'host' : requested || 'viewer';
+    const effectiveRole = claim.role;
 
     const member = {
       id: clientId,
@@ -103,11 +261,16 @@ export class Studio extends EventEmitter {
       screenSharing: false,
       speaking: false,
       sourceIds: [],
+      breakoutId: null,
     };
     this.members.set(clientId, member);
     if (effectiveRole === 'host') {
+      // Only one seat: whoever held it steps down to co-host.
+      const previous = this.hostId ? this.members.get(this.hostId) : null;
+      if (previous && previous.id !== clientId) previous.role = 'cohost';
       this.hostId = clientId;
       this.hostName = memberName;
+      this._hostClaimed = true;
     }
     this.addChat({
       authorId: 'system',
@@ -123,6 +286,8 @@ export class Studio extends EventEmitter {
     const member = this.members.get(clientId);
     if (!member) return false;
     this.members.delete(clientId);
+    const breakout = member.breakoutId ? this.breakouts.get(member.breakoutId) : null;
+    if (breakout) breakout.memberIds = breakout.memberIds.filter((id) => id !== clientId);
     for (const sourceId of [...member.sourceIds]) {
       this.removeSource(sourceId, { byId: clientId, silent: true });
     }
@@ -130,12 +295,20 @@ export class Studio extends EventEmitter {
       this.stream.publisherId = null;
     }
     if (this.hostId === clientId) {
-      // Keep the room controllable: hand the host role to the earliest member.
-      const next = [...this.members.values()].sort((a, b) => a.joinedAt - b.joinedAt)[0];
+      // Keep the room controllable: hand the host seat to the earliest co-host,
+      // otherwise to the earliest member. When the room empties the seat stays
+      // open until someone claims it with the host password.
+      const members = [...this.members.values()];
+      const next =
+        members
+          .filter((candidate) => candidate.role === 'cohost')
+          .sort((a, b) => a.joinedAt - b.joinedAt)[0] ||
+        members.sort((a, b) => a.joinedAt - b.joinedAt)[0];
       if (next) {
         next.role = 'host';
         this.hostId = next.id;
         this.hostName = next.name;
+        this._hostClaimed = true;
       } else {
         this.hostId = null;
       }
@@ -148,6 +321,7 @@ export class Studio extends EventEmitter {
     });
     this.emit('members', this.membersSnapshot());
     this.emit('sources', this.sourcesSnapshot());
+    if (breakout) this.emit('breakouts', this.breakoutsSnapshot());
     return true;
   }
 
@@ -159,7 +333,7 @@ export class Studio extends EventEmitter {
     return this.members.get(clientId)?.name || 'Guest';
   }
 
-  updateMember(clientId, patch = {}) {
+  updateMember(clientId, patch: any = {}) {
     const member = this.members.get(clientId);
     if (!member) return null;
     if (patch.muted !== undefined) member.muted = Boolean(patch.muted);
@@ -171,7 +345,358 @@ export class Studio extends EventEmitter {
     return member;
   }
 
-  addChat({ authorId, authorName, text, kind = 'text' } = {}) {
+  /**
+   * Grant, revoke or hand over roles. Only the host may do this, which is how a
+   * co-host is granted *without* a password.
+   *
+   * @param {string} byId      the acting member (must be the host)
+   * @param {string} memberId  the member being changed
+   * @param {string} role      `host` (hand over), `cohost`, `viewer` or `visitor`
+   */
+  setMemberRole(byId, memberId, role) {
+    if (this.hostId !== byId) return { ok: false, error: 'only the host can change roles' };
+    if (!isRole(role)) return { ok: false, error: `unsupported role: ${role}` };
+    const target = this.members.get(memberId);
+    if (!target) return { ok: false, error: 'member not found' };
+    const nextRole = normalizeRole(role);
+    const host = this.members.get(this.hostId) || null;
+
+    if (nextRole === 'host') {
+      if (target.id === this.hostId) return { ok: false, error: 'already the host' };
+      const previous = host;
+      target.role = 'host';
+      this.hostId = target.id;
+      this.hostName = target.name;
+      this._hostClaimed = true;
+      if (previous && previous.id !== target.id) previous.role = 'cohost';
+      this.addChat({
+        authorId: 'system',
+        authorName: 'Quandrite',
+        kind: 'system',
+        text: `${target.name} is now the host`,
+      });
+    } else if (nextRole === 'cohost') {
+      if (target.role === 'cohost') return { ok: true, member: { ...target } };
+      target.role = 'cohost';
+      this.addChat({
+        authorId: 'system',
+        authorName: 'Quandrite',
+        kind: 'system',
+        text: `${host?.name || 'The host'} made ${target.name} a co-host`,
+      });
+    } else {
+      if (target.id === this.hostId) {
+        return { ok: false, error: 'hand the host role to someone else before changing your own role' };
+      }
+      if (target.role !== nextRole) {
+        target.role = nextRole;
+        this.addChat({
+          authorId: 'system',
+          authorName: 'Quandrite',
+          kind: 'system',
+          text: `${target.name} is now a ${nextRole}`,
+        });
+      }
+    }
+
+    this.emit('members', this.membersSnapshot());
+    return { ok: true, member: { ...target } };
+  }
+
+  /**
+   * Rotate the room passwords. Host only; the new values are never broadcast -
+   * they are returned to the host that changed them.
+   */
+  updateCredentials(byId, { hostPassword, cohostPassword }: any = {}) {
+    if (this.hostId !== byId) return { ok: false, error: 'only the host can change the room passwords' };
+
+    const next = { ...this.credentials };
+    const errors = [];
+    for (const [key, value] of Object.entries({ hostPassword, cohostPassword })) {
+      if (value === undefined || value === null || value === '') continue;
+      const secret = cleanSecret(value);
+      if (!isPasswordValid(secret)) {
+        errors.push(`${key} must be between ${MIN_PASSWORD_LENGTH} and ${MAX_PASSWORD_LENGTH} characters`);
+        continue;
+      }
+      next[key] = secret;
+    }
+    if (errors.length) return { ok: false, errors };
+    if (!hostPassword && !cohostPassword) return { ok: false, error: 'no password supplied' };
+
+    this.credentials = next;
+    if (hostPassword) this.hostPasswordRequired = true;
+    this.addChat({
+      authorId: 'system',
+      authorName: 'Quandrite',
+      kind: 'system',
+      text: 'The room passwords were updated',
+    });
+    return { ok: true, credentials: this.credentialsSnapshot() };
+  }
+
+  /** Passwords for the host only - never part of a shared snapshot. */
+  credentialsSnapshot() {
+    return { hostPassword: this.credentials.hostPassword, cohostPassword: this.credentials.cohostPassword };
+  }
+
+  /**
+   * Change the role of someone already in the room - a re-join that claims a
+   * seat, or an upgrade from viewer to co-host with the room password.
+   */
+  claimRole(clientId, { role = null, password = null }: any = {}) {
+    const member = this.members.get(clientId);
+    if (!member) return { ok: false, error: 'join the room first' };
+    // Re-joining never silently takes a role away - stepping down is the host's
+    // call through `setMemberRole` - so an unprivileged request keeps what you
+    // already hold.
+    if (!isRole(role) || role === member.role) return { ok: true, member: { ...member } };
+    if (isPassiveRole(role) && canControlBroadcast(member.role)) {
+      return { ok: true, member: { ...member } };
+    }
+
+    const claim = this.resolveRole({ role, password, isFirst: false });
+    if (!claim.ok) return claim;
+    if (claim.role === member.role) return { ok: true, member: { ...member } };
+
+    if (claim.role === 'host') {
+      const previous = this.members.get(this.hostId);
+      member.role = 'host';
+      this.hostId = member.id;
+      this.hostName = member.name;
+      this._hostClaimed = true;
+      if (previous && previous.id !== member.id) previous.role = 'cohost';
+      this.addChat({
+        authorId: 'system',
+        authorName: 'Quandrite',
+        kind: 'system',
+        text: `${member.name} is now the host`,
+      });
+    } else {
+      member.role = claim.role;
+      this.addChat({
+        authorId: 'system',
+        authorName: 'Quandrite',
+        kind: 'system',
+        text: `${member.name} is now a ${claim.role}`,
+      });
+    }
+
+    this.emit('members', this.membersSnapshot());
+    return { ok: true, member: { ...member } };
+  }
+
+  isHost(clientId) {
+    return Boolean(clientId) && this.hostId === clientId;
+  }
+
+  /** Everyone who is not driving the broadcast - viewers and visitors. */
+  passiveMembers() {
+    return [...this.members.values()].filter((member) => !canControlBroadcast(member.role));
+  }
+
+  // --------------------------------------------------------------- breakouts
+
+  get isBreakout() {
+    return Boolean(this.breakoutOf);
+  }
+
+  /**
+   * Split the room into breakout rooms.
+   *
+   * Every breakout is a room of its own (its own chat and attendees) owned by
+   * this studio. Participants are distributed round-robin, or by the supplied
+   * assignment map, while the host stays in the main room so they can move
+   * between breakouts.
+   */
+  createBreakouts({ count = 2, labels = [], assignments = null }: any = {}) {
+    if (this.isBreakout) return { ok: false, error: 'a breakout room cannot be split again' };
+    if (!this.breakoutRooms?.create) {
+      return { ok: false, error: 'breakout rooms are not available on this server' };
+    }
+    if (this.breakouts.size) {
+      return { ok: false, error: 'this room already has breakout rooms - remove them first' };
+    }
+
+    const total = Math.max(1, Math.min(MAX_BREAKOUTS, Math.floor(Number(count) || 2)));
+    const created = [];
+    for (let index = 0; index < total; index += 1) {
+      const id = `${this.id}-b${index + 1}`;
+      const label = cleanText(labels[index], MAX_BREAKOUT_LABEL) || `Breakout ${index + 1}`;
+      const room = this.breakoutRooms.create({ id, name: `${this.name} - ${label}`, parentId: this.id, index: index + 1 });
+      if (!room) {
+        for (const entry of created) this.breakoutRooms.remove?.(entry.id);
+        this.breakouts.clear();
+        return { ok: false, error: 'the server could not open the breakout rooms' };
+      }
+      const record = { id, label, index: index + 1, open: false, openedAt: null, memberIds: [], createdAt: Date.now() };
+      this.breakouts.set(id, record);
+      created.push(record);
+    }
+
+    this.autoAssignBreakouts(assignments);
+    this.addChat({
+      authorId: 'system',
+      authorName: 'Quandrite',
+      kind: 'system',
+      text: `${total} breakout room(s) created - assign people, then open them`,
+    });
+    this.emit('breakouts', this.breakoutsSnapshot());
+    return { ok: true, breakouts: this.breakoutsSnapshot() };
+  }
+
+  /** Spread the participants across the breakout rooms (host stays home). */
+  autoAssignBreakouts(assignments = null) {
+    const ids = [...this.breakouts.keys()];
+    if (!ids.length) return { ok: false, error: 'there are no breakout rooms yet' };
+
+    const explicit = assignments instanceof Map ? assignments : new Map(Object.entries(assignments || {}));
+    let cursor = 0;
+    for (const member of [...this.members.values()].sort((a, b) => a.joinedAt - b.joinedAt)) {
+      if (member.id === this.hostId && !explicit.has(member.id)) {
+        this._placeMember(member, null);
+        continue;
+      }
+      const target = explicit.has(member.id) ? explicit.get(member.id) : ids[cursor % ids.length];
+      cursor += 1;
+      this._placeMember(member, target);
+    }
+
+    this.emit('members', this.membersSnapshot());
+    this.emit('breakouts', this.breakoutsSnapshot());
+    return { ok: true, breakouts: this.breakoutsSnapshot() };
+  }
+
+  /** Send one member to a breakout room, or back to the main room (`null`). */
+  assignBreakout(memberId, breakoutId = null) {
+    const member = this.members.get(memberId);
+    if (!member) return { ok: false, error: 'member not found' };
+    if (breakoutId !== null && breakoutId !== undefined && !this.breakouts.has(breakoutId)) {
+      return { ok: false, error: 'breakout room not found' };
+    }
+    if (member.breakoutId === (breakoutId ?? null)) return { ok: true, member: { ...member } };
+
+    this._placeMember(member, breakoutId ?? null);
+    this.emit('members', this.membersSnapshot());
+    this.emit('breakouts', this.breakoutsSnapshot());
+    return { ok: true, member: { ...member } };
+  }
+
+  /** Move a member's assignment, keeping the breakout rosters in step. */
+  _placeMember(member, breakoutId) {
+    const previous = member.breakoutId ? this.breakouts.get(member.breakoutId) : null;
+    if (previous) previous.memberIds = previous.memberIds.filter((id) => id !== member.id);
+
+    const target = breakoutId ? this.breakouts.get(breakoutId) : null;
+    member.breakoutId = target ? target.id : null;
+    if (target && !target.memberIds.includes(member.id)) target.memberIds.push(member.id);
+    return member;
+  }
+
+  /**
+   * Open or close breakout rooms.
+   *
+   * Closing keeps the assignments so the same groups can be reopened; attendees
+   * are sent back to the main room by the signalling layer.
+   */
+  setBreakoutsOpen(open, { breakoutId = null, durationMs = 0 }: any = {}) {
+    const targets = breakoutId
+      ? [this.breakouts.get(breakoutId)].filter(Boolean)
+      : [...this.breakouts.values()];
+    if (!targets.length) return { ok: false, error: 'breakout room not found' };
+
+    for (const breakout of targets) {
+      breakout.open = Boolean(open);
+      breakout.openedAt = open ? Date.now() : null;
+    }
+
+    if (open && durationMs > 0) this._scheduleBreakoutClose(durationMs);
+    else if (!open && !breakoutId) this._clearBreakoutTimer();
+
+    this.addChat({
+      authorId: 'system',
+      authorName: 'Quandrite',
+      kind: 'system',
+      text: open
+        ? `${targets.map((breakout) => breakout.label).join(', ')} open - join your room`
+        : `${targets.map((breakout) => breakout.label).join(', ')} closed - back to the main room`,
+    });
+    this.emit('members', this.membersSnapshot());
+    this.emit('breakouts', this.breakoutsSnapshot());
+    return { ok: true, breakouts: this.breakoutsSnapshot() };
+  }
+
+  /** Remove every breakout room and bring the assignments home. */
+  async clearBreakouts() {
+    this._clearBreakoutTimer();
+    const removed = [...this.breakouts.values()];
+    this.breakouts.clear();
+    this.breakoutSession = null;
+    for (const member of this.members.values()) member.breakoutId = null;
+
+    for (const breakout of removed) {
+      try {
+        await this.breakoutRooms?.remove?.(breakout.id);
+      } catch {
+        // a room that is already gone is fine
+      }
+    }
+
+    this.emit('members', this.membersSnapshot());
+    this.emit('breakouts', this.breakoutsSnapshot());
+    return { ok: true, removed: removed.map((breakout) => breakout.id) };
+  }
+
+  /** The breakout catalogue: what exists, what is open, who is where. */
+  breakoutsSnapshot() {
+    const rooms = [...this.breakouts.values()].map((breakout) => ({
+      id: breakout.id,
+      label: breakout.label,
+      index: breakout.index,
+      open: breakout.open,
+      openedAt: breakout.openedAt ?? null,
+      memberIds: [...breakout.memberIds],
+      memberCount: breakout.memberIds.length,
+    }));
+    return {
+      available: Boolean(this.breakoutRooms?.create),
+      max: MAX_BREAKOUTS,
+      active: Boolean(this.breakoutSession),
+      startedAt: this.breakoutSession?.startedAt ?? null,
+      endsAt: this.breakoutSession?.endsAt ?? null,
+      durationMs: this.breakoutSession?.durationMs ?? 0,
+      rooms,
+    };
+  }
+
+  /** Rooms that carry chat on their own (the parent plus every breakout). */
+  chatRooms() {
+    return [this.id, ...[...this.breakouts.keys()]];
+  }
+
+  /** Auto-close the breakout session when the timer runs out. */
+  _scheduleBreakoutClose(durationMs) {
+    this._clearBreakoutTimer();
+    const duration = Math.max(1000, Math.floor(Number(durationMs) || 0));
+    const startedAt = Date.now();
+    this.breakoutSession = { startedAt, durationMs: duration, endsAt: startedAt + duration };
+    this._breakoutTimer = setTimeout(() => {
+      this._breakoutTimer = null;
+      this.breakoutSession = null;
+      this.setBreakoutsOpen(false);
+    }, duration);
+    if (typeof this._breakoutTimer.unref === 'function') this._breakoutTimer.unref();
+  }
+
+  _clearBreakoutTimer() {
+    if (this._breakoutTimer) {
+      clearTimeout(this._breakoutTimer);
+      this._breakoutTimer = null;
+    }
+    this.breakoutSession = null;
+  }
+
+  addChat({ authorId, authorName, text, kind = 'text' }: any = {}) {
     const body = kind === 'system' ? cleanText(text, MAX_CHAT_LENGTH) : String(text ?? '').trim().slice(0, MAX_CHAT_LENGTH);
     if (!body) return null;
     const message = {
@@ -199,11 +724,13 @@ export class Studio extends EventEmitter {
    * A single machine may register several at once - that is how multiple
    * cameras appear side by side in the program picture.
    */
-  addSource({ id, ownerId, label, kind = 'camera', deviceId = null, groupId = null, meta = {} } = {}) {
+  addSource({ id, ownerId, label, kind = 'camera', deviceId = null, groupId = null, meta = {} }: any = {}) {
     if (!ownerId) return { ok: false, error: 'ownerId is required' };
     if (!SOURCE_KINDS.includes(kind)) {
       return { ok: false, error: `unsupported source kind: ${kind}` };
     }
+    const owner = this.members.get(ownerId);
+    if (!owner) return { ok: false, error: 'join the room before publishing a source' };
     const sourceId = cleanText(id, 80) || randomUUID();
     const existing = this.sources.get(sourceId);
     if (existing && existing.ownerId !== ownerId) {
@@ -224,6 +751,8 @@ export class Studio extends EventEmitter {
       groupId: groupId ? String(groupId).slice(0, 200) : null,
       meta: typeof meta === 'object' && meta ? meta : {},
       active: true,
+      // What the owner would like the host to do with this source.
+      request: null,
       addedAt: existing?.addedAt ?? Date.now(),
       updatedAt: Date.now(),
     };
@@ -231,7 +760,14 @@ export class Studio extends EventEmitter {
     if (member && !member.sourceIds.includes(sourceId)) member.sourceIds.push(sourceId);
 
     let programChanged = false;
-    if (!this.program.sourceId && source.kind !== 'audio') {
+    // A camera or screen added by the host or a co-host goes on air when the
+    // program is empty. A participant's own camera waits to be asked for, so
+    // nobody can put themselves on the program.
+    if (
+      !this.program.sourceId &&
+      (source.kind === 'camera' || source.kind === 'screen') &&
+      canControlBroadcast(owner.role)
+    ) {
       this.program = { ...this.program, sourceId, updatedAt: Date.now() };
       programChanged = true;
     }
@@ -245,19 +781,25 @@ export class Studio extends EventEmitter {
     return { ok: true, source };
   }
 
-  updateSource(id, patch = {}, { byId } = {}) {
+  updateSource(id, patch: any = {}, { byId }: any = {}) {
     const source = this.sources.get(id);
     if (!source) return { ok: false, error: 'source not found' };
     if (byId && source.ownerId !== byId) return { ok: false, error: 'not your source' };
     if (patch.label !== undefined) source.label = cleanText(patch.label, MAX_SOURCE_LABEL) || source.label;
     if (patch.active !== undefined) source.active = Boolean(patch.active);
+    if (patch.request !== undefined) {
+      if (patch.request === null || patch.request === '') source.request = null;
+      else if (!SOURCE_REQUESTS.includes(patch.request)) {
+        return { ok: false, error: `unsupported request: ${patch.request}` };
+      } else source.request = patch.request;
+    }
     if (patch.meta && typeof patch.meta === 'object') source.meta = { ...source.meta, ...patch.meta };
     source.updatedAt = Date.now();
     this.emit('sources', this.sourcesSnapshot());
     return { ok: true, source };
   }
 
-  removeSource(id, { byId, silent = false } = {}) {
+  removeSource(id, { byId, silent = false }: any = {}) {
     const source = this.sources.get(id);
     if (!source) return { ok: false, error: 'source not found' };
     if (byId && source.ownerId !== byId) return { ok: false, error: 'not your source' };
@@ -300,7 +842,7 @@ export class Studio extends EventEmitter {
    * Choose what goes out on the program output.
    * @param {{mode?: string, sourceId?: string|null, gridIds?: string[]}} input
    */
-  setProgram({ mode, sourceId, gridIds } = {}) {
+  setProgram({ mode, sourceId, gridIds }: any = {}) {
     const next = { ...this.program };
     const explicitGrid = gridIds !== undefined;
 
@@ -341,8 +883,22 @@ export class Studio extends EventEmitter {
 
     next.updatedAt = Date.now();
     this.program = next;
-    this.emit('program', this.programSnapshot());
-    return { ok: true, program: this.programSnapshot() };
+    const program = this.programSnapshot();
+
+    // A request is satisfied the moment its source is on the program, so the
+    // host never has to clear it by hand.
+    const onAir = new Set(program.onAir);
+    let satisfied = false;
+    for (const source of this.sources.values()) {
+      if (source.request && onAir.has(source.id)) {
+        source.request = null;
+        satisfied = true;
+      }
+    }
+
+    this.emit('program', program);
+    if (satisfied) this.emit('sources', this.sourcesSnapshot());
+    return { ok: true, program };
   }
 
   // ------------------------------------------------------------------ scene
@@ -353,8 +909,8 @@ export class Studio extends EventEmitter {
    * Supported types: title, announcement, screenshare, song, break, ended.
    * Timed overlays clear themselves; persistent ones stay until replaced.
    */
-  setScene(input = {}) {
-    const created = createOverlay(input);
+  setScene(input: any = {}) {
+    const created: any = createOverlay(input);
     if (!created.ok) return { ok: false, errors: created.errors };
     const scene = created.value;
 
@@ -391,7 +947,7 @@ export class Studio extends EventEmitter {
     return { ok: true, scene };
   }
 
-  clearScene({ auto = false } = {}) {
+  clearScene({ auto = false }: any = {}) {
     if (this._sceneTimer) {
       clearTimeout(this._sceneTimer);
       this._sceneTimer = null;
@@ -412,7 +968,7 @@ export class Studio extends EventEmitter {
   // ----------------------------------------------------------- destinations
 
   /** Add a platform to the fan-out. Restarts the relay when already live. */
-  addDestination(input = {}) {
+  addDestination(input: any = {}) {
     const limit = this.config?.maxDestinationsPerRoom ?? 8;
     if (this.destinations.size >= limit) {
       return { ok: false, error: `a room can stream to at most ${limit} destinations` };
@@ -434,7 +990,7 @@ export class Studio extends EventEmitter {
     return { ok: true, destination: redactDestination(destination) };
   }
 
-  updateDestination(id, patch = {}) {
+  updateDestination(id, patch: any = {}) {
     const destination = this.destinations.get(id);
     if (!destination) return { ok: false, error: 'destination not found' };
 
@@ -485,7 +1041,7 @@ export class Studio extends EventEmitter {
   }
 
   _buildTargets(recordingEntry) {
-    const targets = this.enabledDestinations().map((destination) => ({
+    const targets: any[] = this.enabledDestinations().map((destination) => ({
       kind: 'rtmp',
       url: destination.url,
       onfail: 'ignore',
@@ -560,7 +1116,7 @@ export class Studio extends EventEmitter {
    * Go live: start the ffmpeg relay that fans the program feed out to every
    * enabled platform, optionally recording it at the same time.
    */
-  async startStream({ preset, record = false, byId = null, resolution } = {}) {
+  async startStream({ preset, record = false, byId = null, resolution }: any = {}) {
     if (this.relay && ['connecting', 'live', 'reconnecting'].includes(this.stream.status)) {
       return { ok: false, error: 'the stream is already live' };
     }
@@ -630,7 +1186,7 @@ export class Studio extends EventEmitter {
   }
 
   /** Take the broadcast off the air and finalise the recording. */
-  async stopStream({ byId = null, reason = 'stopped' } = {}) {
+  async stopStream({ byId = null, reason = 'stopped' }: any = {}) {
     if (!this.relay) return { ok: false, error: 'the stream is not live' };
     const relay = this.relay;
     this.stream.status = 'stopping';
@@ -786,10 +1342,16 @@ export class Studio extends EventEmitter {
         id: this.id,
         name: this.name,
         hostId: this.hostId,
+        hostName: this.hostName,
         createdAt: this.createdAt,
+        memberCount: this.members.size,
+        cohostCount: [...this.members.values()].filter((member) => member.role === 'cohost').length,
+        viewerCount: this.passiveMembers().length,
+        requiresHostPassword: this.hostPasswordRequired,
       },
       members: this.membersSnapshot(),
       chat: this.chat.slice(-100),
+      breakouts: this.breakoutsSnapshot(),
       sources: this.sourcesSnapshot(),
       program: this.programSnapshot(),
       scene: this.sceneSnapshot(),
@@ -810,6 +1372,16 @@ export class Studio extends EventEmitter {
     if (this._sceneTimer) {
       clearTimeout(this._sceneTimer);
       this._sceneTimer = null;
+    }
+    this._clearBreakoutTimer();
+    const breakouts = [...this.breakouts.values()];
+    this.breakouts.clear();
+    for (const breakout of breakouts) {
+      try {
+        await this.breakoutRooms?.remove?.(breakout.id);
+      } catch {
+        // the child room may already be gone
+      }
     }
     const relay = this.relay;
     this.relay = null;

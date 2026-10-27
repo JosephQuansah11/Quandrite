@@ -9,7 +9,18 @@
 import { CLIENT, SERVER } from '/shared/protocol.js';
 
 export class QuandriteSocket extends EventTarget {
-  constructor({ url, autoReconnect = true, logger = console } = {}) {
+
+  // --- state (typed loosely while the class is migrated) ---
+  attempt: any;
+  autoReconnect: any;
+  backpressureQueue: any;
+  counter: any;
+  logger: any;
+  manualClose: any;
+  pending: any;
+  socket: any;
+  url: any;
+  constructor({ url, autoReconnect = true, logger = console }: any = {}) {
     super();
     this.url = url;
     this.autoReconnect = autoReconnect;
@@ -103,7 +114,7 @@ export class QuandriteSocket extends EventTarget {
    * Send a protocol request and resolve with the server ack.
    * @returns {Promise<object>}
    */
-  send(type, payload = {}, { timeoutMs = 15000 } = {}) {
+  send(type, payload: any = {}, { timeoutMs = 15000 }: any = {}) {
     if (!this.connected) return Promise.reject(new Error('not connected to the server'));
     this.counter += 1;
     const id = `${this.counter}-${Date.now().toString(36)}`;
@@ -152,8 +163,8 @@ export class QuandriteSocket extends EventTarget {
     return () => this.removeEventListener(type, wrapped);
   }
 
-  async join({ roomId, name, role }) {
-    const result = await this.send(CLIENT.JOIN, { roomId, name, role });
+  async join({ roomId, name, role, password }) {
+    const result = await this.send(CLIENT.JOIN, { roomId, name, role, password });
     return result;
   }
 

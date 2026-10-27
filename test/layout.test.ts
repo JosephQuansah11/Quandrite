@@ -6,7 +6,7 @@ import {
   computeProgramLayout,
   gridColumnsFor,
   resolveProgramSources,
-} from '../shared/layout.js';
+} from '../shared/layout.ts';
 
 test('gridColumnsFor picks sensible column counts', () => {
   assert.equal(gridColumnsFor(1), 1);
@@ -77,6 +77,32 @@ test('resolveProgramSources shows every grid member together', () => {
 test('grid mode without an explicit list uses every camera and screen', () => {
   const onAir = resolveProgramSources({ sources: SOURCES, program: { mode: 'grid', gridIds: [] } });
   assert.deepEqual(onAir.map((source) => source.id), ['cam-1', 'cam-2', 'screen-1']);
+});
+
+const PARTICIPANTS = [
+  { id: 'cam-1', kind: 'camera', label: 'Camera 1' },
+  { id: 'participant:b', kind: 'virtual', label: 'Bob' },
+  { id: 'mic-1', kind: 'audio', label: 'Microphone' },
+];
+
+test('participants who joined the call are part of the grid', () => {
+  const grid = resolveProgramSources({ sources: PARTICIPANTS, program: { mode: 'grid', gridIds: [] } });
+  assert.deepEqual(grid.map((source) => source.id), ['cam-1', 'participant:b']);
+
+  const chosen = resolveProgramSources({
+    sources: PARTICIPANTS,
+    program: { mode: 'grid', gridIds: ['participant:b', 'cam-1'] },
+  });
+  assert.deepEqual(chosen.map((source) => source.id), ['participant:b', 'cam-1']);
+
+  const single = resolveProgramSources({
+    sources: PARTICIPANTS,
+    program: { mode: 'single', sourceId: 'participant:b' },
+  });
+  assert.deepEqual(single.map((source) => source.id), ['participant:b']);
+
+  const fallback = resolveProgramSources({ sources: PARTICIPANTS, program: { mode: 'single' } });
+  assert.deepEqual(fallback.map((source) => source.id), ['cam-1'], 'a camera still wins the single slot');
 });
 
 test('screenshare mode prefers the requested screen and ignores cameras', () => {

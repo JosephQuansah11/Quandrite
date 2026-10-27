@@ -20,17 +20,34 @@
       <form id="join-form" class="join-form">
         <input id="join-name" name="name" placeholder="Your name" autocomplete="name" required />
         <input id="join-room" name="room" placeholder="Room code" autocomplete="off" required />
-        <select id="join-role" name="role" title="Join as">
+        <select id="join-role" name="role" title="Join as - the first person in a brand new room becomes the host">
           <option value="host">Host</option>
           <option value="cohost">Co-host</option>
           <option value="viewer" selected>Viewer</option>
+          <option value="visitor">Visitor</option>
         </select>
+        <input
+          id="join-password"
+          name="password"
+          type="password"
+          autocomplete="off"
+          placeholder="Role password"
+          title="Required to claim the host or co-host role - viewers and visitors need no password"
+        />
         <button type="submit" class="primary">Join</button>
       </form>
+
+      <div class="pane-toggles" id="pane-toggles" role="group" aria-label="Show or hide panes">
+        <button data-pane="program" class="tiny ghost" aria-pressed="true">Program</button>
+        <button data-pane="participants" class="tiny ghost" aria-pressed="true">Participants</button>
+        <button data-pane="sources" class="tiny ghost" aria-pressed="true" data-requires="control">Cameras</button>
+        <button data-pane="sidebar" class="tiny ghost" aria-pressed="true">Sidebar</button>
+      </div>
 
       <div class="status-cluster">
         <span id="connection-pill" class="pill offline">offline</span>
         <span id="role-pill" class="pill">guest</span>
+        <span id="breakout-pill" class="pill hidden">main room</span>
         <span id="live-pill" class="pill">off air</span>
         <span id="rec-pill" class="pill">not recording</span>
       </div>
@@ -38,7 +55,7 @@
 
     <main class="layout">
       <section class="stage">
-        <div class="panel program-panel">
+        <div class="panel program-panel" data-pane="program">
           <div class="panel-head">
             <h2>Program preview <small>(what your viewers receive)</small></h2>
             <div class="program-meta">
@@ -46,6 +63,10 @@
               <span id="program-bitrate">0 kbps</span>
               <span id="program-uptime">00:00</span>
             </div>
+          </div>
+          <div id="breakout-banner" class="breakout-banner hidden">
+            <span id="breakout-banner-text">You are in a breakout room.</span>
+            <button id="btn-leave-breakout" class="tiny">Back to the main room</button>
           </div>
           <div class="program-frame">
             <canvas id="program-canvas" width="1920" height="1080"></canvas>
@@ -58,7 +79,7 @@
             </div>
           </div>
           <div class="program-controls">
-            <div class="segmented" id="program-mode">
+            <div class="segmented" id="program-mode" data-requires="control">
               <button data-mode="single" class="active">Single camera</button>
               <button data-mode="grid">All cameras</button>
               <button data-mode="screenshare">Screen</button>
@@ -67,22 +88,22 @@
           </div>
         </div>
 
-        <div class="panel sources-panel">
+        <div class="panel participants-panel" data-pane="participants">
+          <div class="panel-head">
+            <h2>In this room <small id="participant-room-label">main room</small></h2>
+            <span id="participant-count" class="muted">0 here</span>
+          </div>
+          <div id="participant-strip" class="participant-strip"></div>
+        </div>
+
+        <div class="panel sources-panel" id="sources-panel" data-pane="sources" data-requires="control">
           <div class="panel-head">
             <h2>Cameras &amp; screens <small id="source-count">(0)</small></h2>
             <div class="source-actions">
-              <button id="btn-add-camera" class="primary">Add camera</button>
-              <button id="btn-add-all-cameras" class="ghost">Add all cameras</button>
-              <button id="btn-share-screen" class="ghost">Share screen</button>
-              <label class="toggle" title="Include system audio in the screen share">
-                <input id="screen-audio" type="checkbox" checked />
-                <span>with sound</span>
-              </label>
-              <button id="btn-pair-bluetooth" class="ghost" title="Pair a Bluetooth camera (phone, action cam)">
-                Pair Bluetooth
-              </button>
+              <button id="btn-open-devices" class="primary">Cameras &amp; screens</button>
             </div>
           </div>
+          <div id="source-requests" class="source-requests muted"></div>
           <div id="device-list" class="device-list"></div>
           <div id="source-grid" class="source-grid">
             <p class="muted">No sources yet.</p>
@@ -90,9 +111,10 @@
         </div>
       </section>
 
-      <aside class="sidebar">
+      <aside class="sidebar" data-pane="sidebar">
         <nav class="tabs" id="tabs">
           <button data-tab="scenes" class="active">Scenes</button>
+          <button data-tab="people">People</button>
           <button data-tab="platforms">Go live</button>
           <button data-tab="chat">Chat</button>
           <button data-tab="meeting">Meeting</button>
@@ -100,14 +122,87 @@
         </nav>
 
         <div class="tab-panel" data-panel="scenes">
-          <div class="scene-buttons" id="scene-buttons"></div>
-          <form id="scene-form" class="form"></form>
-          <button id="btn-clear-scene" class="ghost wide">Clear overlay</button>
+          <div class="scene-buttons" id="scene-buttons" data-requires="control"></div>
+          <form id="scene-form" class="form" data-requires="control"></form>
+          <button id="btn-clear-scene" class="ghost wide" data-requires="control">Clear overlay</button>
           <div id="scene-current" class="scene-current muted">No overlay on air.</div>
         </div>
 
+        <div class="tab-panel hidden" data-panel="people">
+          <div class="people-head">
+            <strong>Participants <span id="people-count">(0)</span></strong>
+            <button id="btn-invite" class="tiny ghost" title="Copy the room link so you can invite people">Invite</button>
+          </div>
+          <div class="row wrap" data-requires="control">
+            <button id="btn-mute-all" class="tiny ghost">Mute all</button>
+            <button id="btn-stop-all-video" class="tiny ghost">Stop all video</button>
+          </div>
+          <div id="people-summary" class="people-summary muted">No one has joined yet.</div>
+          <ul id="people-list" class="list people-list"></ul>
+          <div class="people-footer">
+            <button id="btn-unmute-me" class="tiny ghost">Unmute me</button>
+            <button id="btn-claim-host" class="tiny ghost" title="Claim the host seat with the room password">Claim host</button>
+          </div>
+          <div id="breakout-panel" class="credentials" data-requires="control">
+            <h3>Breakout rooms</h3>
+            <p class="muted">
+              Split the room for smaller discussions. Everyone only sees and hears the room they are
+              in, and the host can drop in on any of them.
+            </p>
+            <div class="row wrap">
+              <label class="inline">Rooms
+                <input id="breakout-count" type="number" min="1" max="8" value="2" />
+              </label>
+              <label class="inline">Minutes
+                <input id="breakout-duration" type="number" min="0" max="180" value="0" />
+              </label>
+            </div>
+            <div class="row wrap">
+              <button id="btn-create-breakouts" class="tiny primary">Create</button>
+              <button id="btn-open-breakouts" class="tiny">Open all</button>
+              <button id="btn-close-breakouts" class="tiny">Close all</button>
+              <button id="btn-shuffle-breakouts" class="tiny">Shuffle</button>
+              <button id="btn-clear-breakouts" class="tiny danger">Remove</button>
+            </div>
+            <div id="breakout-summary" class="muted"></div>
+            <ul id="breakout-list" class="list"></ul>
+            <form id="breakout-announce-form" class="form">
+              <label>Message every room
+                <input id="breakout-announce-text" type="text" placeholder="Five minutes left" />
+              </label>
+              <button type="submit" class="ghost wide tiny">Announce to all rooms</button>
+            </form>
+          </div>
+          <div id="room-credentials" class="credentials" data-requires="host">
+            <h3>Room passwords</h3>
+            <p class="muted">
+              Share the co-host password so people can claim that role themselves, or promote them
+              from the list above without a password.
+            </p>
+            <form id="credential-form" class="form">
+              <label>Host password
+                <input id="credential-host" name="hostPassword" type="text" autocomplete="off" />
+              </label>
+              <label>Co-host password
+                <input id="credential-cohost" name="cohostPassword" type="text" autocomplete="off" />
+              </label>
+              <button type="submit" class="primary wide">Save passwords</button>
+            </form>
+            <div class="row wrap">
+              <button id="btn-copy-host-password" class="ghost tiny">Copy host password</button>
+              <button id="btn-copy-cohost-password" class="ghost tiny">Copy co-host password</button>
+            </div>
+            <div class="row wrap" id="credential-email-row">
+              <input id="credential-email" type="email" placeholder="you@example.com" autocomplete="email" />
+              <button id="btn-email-password" class="tiny ghost">Email me the password</button>
+            </div>
+            <div id="credential-mail" class="muted"></div>
+            <div id="credential-status" class="muted"></div>
+          </div>
+        </div>
+
         <div class="tab-panel hidden" data-panel="platforms">
-          <form id="destination-form" class="form">
+          <form id="destination-form" class="form" data-requires="control">
             <label>Platform
               <select id="destination-platform" required></select>
             </label>
@@ -126,7 +221,7 @@
 
           <ul id="destination-list" class="list"></ul>
 
-          <div class="broadcast-box">
+          <div class="broadcast-box" id="broadcast-box" data-requires="control">
             <label>Video quality
               <select id="stream-preset"></select>
             </label>
@@ -167,6 +262,32 @@
         </div>
       </aside>
     </main>
+
+    <dialog id="device-dialog" class="device-dialog">
+      <div class="dialog-head">
+        <h2>Cameras &amp; screens</h2>
+        <button id="device-dialog-close" class="tiny ghost">Close</button>
+      </div>
+      <p id="device-dialog-status" class="muted">
+        Tick what to publish, then choose where it goes: the studio, the grid, or straight on air.
+      </p>
+      <div id="device-list-picker" class="device-picker"></div>
+      <div class="dialog-actions">
+        <button id="btn-devices-studio" class="tiny">Add to studio</button>
+        <button id="btn-devices-grid" class="tiny primary">Add to grid</button>
+        <button id="btn-devices-air" class="tiny">Put on air</button>
+      </div>
+      <div class="dialog-actions">
+        <label class="toggle" title="Include system audio in the screen share">
+          <input id="screen-audio" type="checkbox" checked />
+          <span>with sound</span>
+        </label>
+        <button id="btn-devices-screen" class="tiny ghost">Share screen</button>
+        <button id="btn-devices-bluetooth" class="tiny ghost" title="Pair a Bluetooth camera (phone, action cam)">
+          Pair Bluetooth
+        </button>
+      </div>
+    </dialog>
 
     <div id="toasts" class="toasts"></div>
     <script type="module" src="/js/app.js"></script>

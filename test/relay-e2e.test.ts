@@ -16,11 +16,11 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
 
-import { createServer } from '../server/index.js';
-import { loadConfig } from '../server/config.js';
-import { resolveFfmpegBin, rootDir } from '../server/config.js';
+import { createServer } from '../server/index.ts';
+import { loadConfig } from '../server/config.ts';
+import { resolveFfmpegBin, rootDir } from '../server/config.ts';
 
-const FFMPEG = process.env.QUANDRITE_FFMPEG_BIN || resolveFfmpegBin();
+const FFMPEG = process.env.QUANDRITE_FFMPEG_BIN || resolveFfmpegBin(undefined);
 const silent = { info() {}, warn() {}, error() {} };
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quandrite-e2e-'));
 const sourceFile = path.join(workDir, 'source.webm');
@@ -31,7 +31,7 @@ let httpBase;
 const listeners = [];
 const ports = [];
 
-function run(bin, args, { timeoutMs = 30000 } = {}) {
+function run(bin, args, { timeoutMs = 30000 }: any = {}) {
   return new Promise((resolve) => {
     const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
@@ -51,7 +51,7 @@ function freePort() {
     const probe = net.createServer();
     probe.on('error', reject);
     probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
+      const { port } = probe.address() as any;
       probe.close(() => resolve(port));
     });
   });
@@ -126,7 +126,7 @@ function connect() {
         waiters.push(waiter);
       });
     },
-    send(type, payload = {}, timeoutMs = 20000) {
+    send(type, payload: any = {}, timeoutMs = 20000) {
       counter += 1;
       const id = `e2e-${counter}`;
       const acked = this.next(
@@ -144,7 +144,7 @@ function connect() {
 
 before(async () => {
   // A short programme: video plus audio, exactly like a MediaRecorder stream.
-  const generated = await run(FFMPEG, [
+  const generated: any = await run(FFMPEG, [
     '-hide_banner',
     '-loglevel',
     'error',

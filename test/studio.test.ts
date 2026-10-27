@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
-import { Studio } from '../server/studio.js';
-import { RecordingStore } from '../server/recordings.js';
-import { loadConfig } from '../server/config.js';
+import { Studio } from '../server/studio.ts';
+import { RecordingStore } from '../server/recordings.ts';
+import { loadConfig } from '../server/config.ts';
 
 const silent = { info() {}, warn() {}, error() {} };
 
@@ -15,32 +15,230 @@ function tmpDir(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `quandrite-${name}-`));
 }
 
-function makeStudio(overrides = {}) {
+// The tests poke at internals, so the helper hands back a loosely typed studio.
+function makeStudio(overrides: any = {}): any {
   const config = loadConfig({ recordingsDir: tmpDir('studio'), ...(overrides.config || {}) });
-  return new Studio({
+  // A stand-in for the room registry: breakout rooms are just ids plus chat.
+  const breakoutRooms = new Map();
+  const adapter =
+    overrides.breakoutRooms === undefined
+      ? {
+          create: ({ id }) => {
+            const room = {
+              id,
+              chat: [],
+              addChat: (message) => {
+                room.chat.push(message);
+                return message;
+              },
+            };
+            breakoutRooms.set(id, room);
+            return room;
+          },
+          remove: async (id) => breakoutRooms.delete(id),
+        }
+      : overrides.breakoutRooms;
+
+  const studio = new Studio({
     id: 'room-1',
     name: 'Test studio',
     hostName: 'Ada',
+    hostPassword: overrides.hostPassword ?? null,
+    cohostPassword: overrides.cohostPassword ?? null,
+    breakoutRooms: adapter,
     config,
     logger: silent,
     recordingStore: overrides.recordingStore ?? null,
   });
+  (studio as any).breakoutRoomStore = breakoutRooms;
+  return studio;
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test('the first member becomes host and later members keep their requested role', () => {
+test('the first member becomes host and roles are claimed with a password', () => {
   const studio = makeStudio();
   const host = studio.join({ clientId: 'a', name: 'Ada' });
-  const cohost = studio.join({ clientId: 'b', name: 'Bob', role: 'cohost' });
+  const cohost = studio.join({
+    clientId: 'b',
+    name: 'Bob',
+    role: 'cohost',
+    password: studio.credentials.cohostPassword,
+  });
   const viewer = studio.join({ clientId: 'c', name: 'Cleo' });
+  const visitor = studio.join({ clientId: 'd', name: 'Dee', role: 'visitor' });
 
   assert.equal(host.role, 'host');
   assert.equal(cohost.role, 'cohost');
   assert.equal(viewer.role, 'viewer');
+  assert.equal(visitor.role, 'visitor');
   assert.equal(studio.hostId, 'a');
-  assert.equal(studio.members.size, 3);
+  assert.equal(studio.members.size, 4);
   assert.ok(studio.chat.some((message) => message.text.includes('Ada joined')));
+});
+
+test('the host and co-host seats refuse a wrong password', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+
+  assert.throws(
+    () => studio.join({ clientId: 'b', name: 'Bob', role: 'cohost', password: 'wrong' }),
+    /co-host password/,
+  );
+  assert.throws(
+    () => studio.join({ clientId: 'b', name: 'Bob', role: 'host' }),
+    /already has a host|host password/,
+  );
+  assert.throws(
+    () => studio.join({ clientId: 'b', name: 'Bob', role: 'host', password: 'wrong' }),
+    /already has a host|host password/,
+  );
+  assert.equal(studio.members.size, 1, 'a refused claim never joins the room');
+
+  // Several people can hold the co-host seat at once.
+  const first = studio.join({
+    clientId: 'b',
+    name: 'Bob',
+    role: 'cohost',
+    password: studio.credentials.cohostPassword,
+  });
+  const second = studio.join({
+    clientId: 'c',
+    name: 'Cleo',
+    role: 'cohost',
+    password: studio.credentials.cohostPassword,
+  });
+  assert.equal(first.role, 'cohost');
+  assert.equal(second.role, 'cohost');
+  assert.equal(studio.members.size, 3);
+});
+
+test('an operator-set host password is enforced from the very first join', () => {
+  const studio = makeStudio({ hostPassword: 'top-secret', cohostPassword: 'team' });
+
+  assert.throws(() => studio.join({ clientId: 'a', name: 'Ada', role: 'host' }), /host password/);
+  const passive = studio.join({ clientId: 'a', name: 'Ada' });
+  assert.equal(passive.role, 'viewer', 'without the password the first joiner only watches');
+
+  const host = studio.join({ clientId: 'b', name: 'Bo', role: 'host', password: 'top-secret' });
+  assert.equal(host.role, 'host');
+  assert.equal(studio.hostPasswordRequired, true);
+
+  const cohost = studio.join({ clientId: 'c', name: 'Cleo', role: 'cohost', password: 'team' });
+  assert.equal(cohost.role, 'cohost');
+});
+
+test('a viewer can upgrade itself with the co-host password', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+
+  assert.equal(studio.claimRole('b', { role: 'cohost', password: 'nope' }).ok, false);
+  assert.equal(studio.getMember('b').role, 'viewer', 'a refused claim changes nothing');
+
+  const claimed = studio.claimRole('b', { role: 'cohost', password: studio.credentials.cohostPassword });
+  assert.equal(claimed.ok, true);
+  assert.equal(claimed.member.role, 'cohost');
+  assert.equal(studio.claimRole('ghost', { role: 'cohost', password: 'x' }).ok, false);
+});
+
+test('re-joining never silently takes a role away', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+
+  assert.equal(studio.claimRole('a', { role: 'viewer' }).member.role, 'host', 'the host keeps the seat');
+  assert.equal(studio.claimRole('a', {}).member.role, 'host', 'no role requested means no change');
+  assert.equal(studio.getMember('a').role, 'host');
+});
+
+test('there is only ever one host, and the host can hand the seat over', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+
+  assert.equal(studio.setMemberRole('b', 'a', 'host').ok, false, 'only the host may change roles');
+
+  const handed = studio.setMemberRole('a', 'b', 'host');
+  assert.equal(handed.ok, true);
+  assert.equal(studio.hostId, 'b');
+  assert.equal(studio.getMember('a').role, 'cohost', 'the outgoing host keeps a co-host seat');
+  assert.equal(studio.membersSnapshot().filter((member) => member.role === 'host').length, 1);
+});
+
+test('the host grants and revokes a co-host without a password', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+
+  assert.equal(studio.setMemberRole('a', 'b', 'cohost').ok, true);
+  assert.equal(studio.getMember('b').role, 'cohost');
+  assert.equal(studio.setMemberRole('a', 'b', 'viewer').ok, true);
+  assert.equal(studio.getMember('b').role, 'viewer');
+  assert.equal(studio.setMemberRole('a', 'a', 'viewer').ok, false, 'the host cannot demote itself');
+  assert.equal(studio.setMemberRole('a', 'ghost', 'cohost').ok, false);
+});
+
+test('leaving hands the host seat to a co-host before anyone else', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+  studio.join({ clientId: 'c', name: 'Cleo' });
+  studio.setMemberRole('a', 'c', 'cohost');
+
+  studio.leave('a');
+  assert.equal(studio.hostId, 'c', 'the co-host takes over from the earliest plain member');
+});
+
+test('a participant can publish their own camera, but not drive the program', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'v', name: 'Vic', role: 'viewer' });
+
+  // Their own camera is theirs to publish.
+  const added = studio.addSource({ id: 'cam-v', ownerId: 'v', kind: 'camera', label: 'Vic camera' });
+  assert.equal(added.ok, true);
+  assert.equal(studio.program.sourceId, null, 'a participant camera never takes the program by itself');
+
+  // ... and theirs to ask about.
+  const asked = studio.updateSource('cam-v', { request: 'grid' }, { byId: 'v' });
+  assert.equal(asked.ok, true);
+  assert.equal(asked.source.request, 'grid');
+  assert.equal(studio.updateSource('cam-v', { request: 'hologram' }, { byId: 'v' }).ok, false);
+  assert.equal(studio.updateSource('cam-v', { request: 'air' }, { byId: 'a' }).ok, false, 'not your source');
+
+  // The host's camera still takes the empty program.
+  studio.addSource({ id: 'cam-a', ownerId: 'a', kind: 'camera' });
+  assert.equal(studio.program.sourceId, 'cam-a');
+
+  // Applying the request satisfies it.
+  const applied = studio.setProgram({ mode: 'grid', gridIds: ['cam-a', 'cam-v'] });
+  assert.equal(applied.ok, true);
+  assert.deepEqual(applied.program.onAir, ['cam-a', 'cam-v']);
+  assert.equal(studio.sources.get('cam-v').request, null, 'a satisfied request clears itself');
+});
+
+test('a participant feed joins the grid without stealing the single slot', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.addSource({ id: 'cam-1', ownerId: 'a', kind: 'camera' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+
+  // The host announces the participant's live video on their behalf.
+  const added = studio.addSource({ id: 'participant:b', ownerId: 'a', kind: 'virtual', label: 'Bob' });
+  assert.equal(added.ok, true);
+  assert.equal(added.source.kind, 'virtual');
+  assert.equal(studio.program.sourceId, 'cam-1', 'a participant does not take the single slot');
+
+  const grid = studio.setProgram({ mode: 'grid' });
+  assert.deepEqual(grid.program.onAir, ['cam-1', 'participant:b'], 'participants join the grid');
+
+  const onAir = studio.setProgram({ mode: 'single', sourceId: 'participant:b' });
+  assert.deepEqual(onAir.program.onAir, ['participant:b'], 'the host can put a participant on air');
+
+  // When the participant leaves, their feed leaves the program too.
+  studio.removeSource('participant:b', { byId: 'a' });
+  assert.deepEqual(studio.programSnapshot().onAir, ['cam-1'], 'the program falls back to the camera');
+  assert.equal(studio.sources.size, 1);
 });
 
 test('the host role is handed over when the host leaves', () => {
@@ -232,7 +430,7 @@ test('startStream wires a relay, marks the publisher and finalises the recording
 
   const spawned = [];
   studio.relayFactory = ({ targets, preset }) => {
-    const relay = new EventEmitter();
+    const relay: any = new EventEmitter();
     relay.targets = targets;
     relay.preset = preset;
     relay.started = false;
@@ -300,7 +498,7 @@ test('adding a destination mid-broadcast rebuilds the relay with the new target'
 
   const relays = [];
   studio.relayFactory = ({ targets, preset }) => {
-    const relay = new EventEmitter();
+    const relay: any = new EventEmitter();
     relay.targets = targets;
     relay.preset = preset;
     relay.start = () => relay.emit('status', { status: 'live' });
@@ -324,4 +522,159 @@ test('adding a destination mid-broadcast rebuilds the relay with the new target'
   assert.equal(relays[1].targets.length, 2, 'the new relay fans out to both platforms');
   assert.equal(studio.stream.status, 'connecting');
   await studio.dispose();
+});
+
+test('only the host can rotate the room passwords', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob', role: 'cohost', password: studio.credentials.cohostPassword });
+
+  assert.equal(studio.updateCredentials('b', { cohostPassword: 'newpass' }).ok, false);
+  const short = studio.updateCredentials('a', { cohostPassword: 'no' });
+  assert.equal(short.ok, false);
+  assert.match(short.errors.join('; '), /between 4 and 64/);
+
+  const rotated = studio.updateCredentials('a', { hostPassword: 'hostpass', cohostPassword: 'cohostpass' });
+  assert.equal(rotated.ok, true);
+  assert.deepEqual(rotated.credentials, { hostPassword: 'hostpass', cohostPassword: 'cohostpass' });
+  assert.equal(studio.hostPasswordRequired, true, 'a set host password is enforced from then on');
+  assert.equal(
+    studio.join({ clientId: 'c', name: 'Cleo', role: 'cohost', password: 'cohostpass' }).role,
+    'cohost',
+  );
+});
+
+test('room passwords never appear in the shared snapshot', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  const snapshot = studio.snapshot();
+  const serialized = JSON.stringify(snapshot);
+  assert.ok(!serialized.includes(studio.credentials.hostPassword));
+  assert.ok(!serialized.includes(studio.credentials.cohostPassword));
+  assert.equal(snapshot.room.hostName, 'Ada');
+  assert.equal(snapshot.room.memberCount, 1);
+  assert.equal(snapshot.room.cohostCount, 0);
+  assert.equal(snapshot.room.viewerCount, 0);
+  assert.equal(snapshot.room.requiresHostPassword, false);
+
+  studio.join({ clientId: 'b', name: 'Bob', role: 'visitor' });
+  const after = studio.snapshot();
+  assert.equal(after.room.memberCount, 2);
+  assert.equal(after.room.viewerCount, 1, 'visitors count as watchers');
+});
+
+test('a room splits into breakout rooms and spreads the participants', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+  studio.join({ clientId: 'c', name: 'Cleo' });
+  studio.join({ clientId: 'd', name: 'Dan' });
+
+  const created = studio.createBreakouts({ count: 3 });
+  assert.equal(created.ok, true);
+  assert.equal(created.breakouts.rooms.length, 3);
+  assert.deepEqual(
+    created.breakouts.rooms.map((room) => room.id),
+    ['room-1-b1', 'room-1-b2', 'room-1-b3'],
+  );
+  assert.equal(studio.breakoutRoomStore.size, 3, 'every breakout is a room of its own');
+  assert.equal(created.breakouts.rooms.every((room) => room.open === false), true);
+  assert.equal(studio.getMember('a').breakoutId, null, 'the host stays in the main room');
+  assert.equal(studio.getMember('b').breakoutId, 'room-1-b1');
+  assert.equal(studio.getMember('c').breakoutId, 'room-1-b2');
+  assert.equal(studio.getMember('d').breakoutId, 'room-1-b3');
+  assert.deepEqual(created.breakouts.rooms.map((room) => room.memberCount), [1, 1, 1]);
+  assert.equal(studio.createBreakouts({ count: 2 }).ok, false, 'breakouts are created once');
+
+  const snapshot = studio.snapshot();
+  assert.equal(snapshot.breakouts.rooms.length, 3);
+  assert.equal(snapshot.members.find((member) => member.id === 'b').breakoutId, 'room-1-b1');
+});
+
+test('the host moves people between rooms and the assignments stick', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+  studio.join({ clientId: 'c', name: 'Cleo' });
+  studio.createBreakouts({ count: 2, labels: ['Design', 'Build'] });
+
+  const moved = studio.assignBreakout('c', 'room-1-b1');
+  assert.equal(moved.ok, true);
+  assert.equal(moved.member.breakoutId, 'room-1-b1');
+  assert.deepEqual(studio.breakouts.get('room-1-b1').memberIds, ['b', 'c']);
+  assert.equal(studio.assignBreakout('ghost', 'room-1-b1').ok, false);
+  assert.equal(studio.assignBreakout('c', 'room-1-b9').ok, false);
+
+  assert.equal(studio.assignBreakout('c', null).ok, true);
+  assert.equal(studio.getMember('c').breakoutId, null);
+  assert.deepEqual(studio.breakouts.get('room-1-b1').memberIds, ['b']);
+
+  studio.assignBreakout('b', 'room-1-b1');
+  studio.leave('b');
+  assert.deepEqual(studio.breakouts.get('room-1-b1').memberIds, [], 'a departing member leaves their room');
+});
+
+test('opening and closing breakout rooms keeps the groups for next time', () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+  studio.createBreakouts({ count: 2 });
+
+  const opened = studio.setBreakoutsOpen(true);
+  assert.equal(opened.ok, true);
+  assert.equal(opened.breakouts.rooms.every((room) => room.open), true);
+  assert.equal(opened.breakouts.rooms.every((room) => room.openedAt !== null), true);
+
+  const closed = studio.setBreakoutsOpen(false);
+  assert.equal(closed.breakouts.rooms.every((room) => !room.open), true);
+  assert.equal(studio.getMember('b').breakoutId, 'room-1-b1', 'the assignment survives the close');
+  assert.equal(studio.setBreakoutsOpen(true, { breakoutId: 'nope' }).ok, false);
+
+  const shuffled = studio.autoAssignBreakouts();
+  assert.equal(shuffled.ok, true);
+  assert.equal(shuffled.breakouts.rooms.reduce((total, room) => total + room.memberCount, 0), 1);
+  assert.equal(studio.autoAssignBreakouts({ b: 'room-1-b2' }).ok, true);
+  assert.equal(studio.getMember('b').breakoutId, 'room-1-b2');
+});
+
+test('breakout rooms are removed with their parent room', async () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.createBreakouts({ count: 2 });
+
+  const cleared = await studio.clearBreakouts();
+  assert.equal(cleared.removed.length, 2);
+  assert.equal(studio.breakoutRoomStore.size, 0);
+  assert.equal(studio.getMember('a').breakoutId, null);
+  assert.equal(studio.breakoutsSnapshot().rooms.length, 0);
+  assert.equal(studio.createBreakouts({ count: 2 }).ok, true, 'breakouts can be created again');
+
+  await studio.dispose();
+  assert.equal(studio.breakoutRoomStore.size, 0, 'disposing the room removes its breakouts');
+});
+
+test('a timed breakout session closes itself', async () => {
+  const studio = makeStudio();
+  studio.join({ clientId: 'a', name: 'Ada' });
+  studio.join({ clientId: 'b', name: 'Bob' });
+  studio.createBreakouts({ count: 2 });
+
+  studio.setBreakoutsOpen(true, { durationMs: 1000 });
+  const live = studio.breakoutsSnapshot();
+  assert.equal(live.active, true);
+  assert.ok(live.endsAt > Date.now());
+
+  await sleep(1200);
+  const done = studio.breakoutsSnapshot();
+  assert.equal(done.active, false, 'the timer cleared the session');
+  assert.equal(done.rooms.every((room) => !room.open), true);
+  assert.equal(studio.getMember('b').breakoutId, 'room-1-b1');
+});
+
+test('a breakout room cannot be split again or created without a registry', () => {
+  const child = makeStudio({ breakoutRooms: null });
+  child.join({ clientId: 'a', name: 'Ada' });
+  assert.equal(child.createBreakouts({ count: 2 }).ok, false);
+  assert.match(child.createBreakouts({ count: 2 }).error, /not available/);
+  assert.equal(child.breakoutsSnapshot().available, false);
 });

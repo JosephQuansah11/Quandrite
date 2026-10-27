@@ -15,7 +15,18 @@ const ICE_SERVERS = [
 ];
 
 export class MeetingMesh extends EventTarget {
-  constructor({ socket, clientId, logger = console, iceServers = ICE_SERVERS } = {}) {
+
+  // --- state (typed loosely while the class is migrated) ---
+  active: any;
+  cameraEnabled: any;
+  clientId: any;
+  iceServers: any;
+  localStream: any;
+  logger: any;
+  micEnabled: any;
+  peers: any;
+  socket: any;
+  constructor({ socket, clientId, logger = console, iceServers = ICE_SERVERS }: any = {}) {
     super();
     this.socket = socket;
     this.clientId = clientId;
@@ -165,6 +176,30 @@ export class MeetingMesh extends EventTarget {
     for (const [, peer] of this.peers) {
       const sender = peer.pc.getSenders().find((entry) => entry.track?.kind === 'video');
       if (sender) await sender.replaceTrack(track);
+    }
+  }
+
+  /**
+   * Add a track that was published after the call started (turning a camera on
+   * mid-meeting): senders of the same kind are swapped, new kinds are added and
+   * the peer connection renegotiates itself.
+   */
+  attachTrack(track, stream) {
+    if (!track) return;
+    if (this.localStream && !this.localStream.getTracks().includes(track)) {
+      this.localStream = new MediaStream([...this.localStream.getTracks(), track]);
+    }
+    for (const [, peer] of this.peers) {
+      const sender = peer.pc.getSenders().find((entry) => entry.track?.kind === track.kind);
+      if (sender) {
+        sender.replaceTrack(track).catch(() => {});
+      } else {
+        try {
+          peer.pc.addTrack(track, stream || this.localStream || new MediaStream([track]));
+        } catch {
+          // a peer that is already closing is fine
+        }
+      }
     }
   }
 

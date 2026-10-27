@@ -10,13 +10,14 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { loadConfig } from './config.js';
-import { RecordingStore } from './recordings.js';
-import { RoomRegistry } from './rooms.js';
-import { SignalingServer } from './signaling.js';
-import { createApiRouter } from './api.js';
+import { loadConfig } from './config.ts';
+import { RecordingStore } from './recordings.ts';
+import { RoomRegistry } from './rooms.ts';
+import { SignalingServer } from './signaling.ts';
+import { createApiRouter } from './api.ts';
+import { Mailer } from './mailer.ts';
 
-export function createServer(options = {}) {
+export function createServer(options: any = {}) {
   const config = options.config || loadConfig(options);
   const logger = options.logger || console;
 
@@ -32,11 +33,32 @@ export function createServer(options = {}) {
   const registry =
     options.registry || new RoomRegistry({ config, recordingStore, logger });
 
+  const mailer =
+    options.mailer ||
+    new Mailer({
+      from: config.mailFrom,
+      smtpUrl: config.smtpUrl,
+      webhookUrl: config.mailWebhook,
+      logger,
+    });
+
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
 
-  app.use('/api', createApiRouter({ registry, recordingStore, config, logger }));
+  app.use(
+    '/api',
+    createApiRouter({
+      registry,
+      recordingStore,
+      config,
+      logger,
+      mailer,
+      // The signalling server is created with the HTTP server below, so the API
+      // reaches it lazily (it pushes the recording library after a delete).
+      getSignaling: () => signaling,
+    }),
+  );
 
   // Recording library: never expose the internal index file.
   app.use(
@@ -54,18 +76,23 @@ export function createServer(options = {}) {
   );
 
   // Shared, dependency free modules used by both the server and the browser.
-  app.use('/shared', express.static(config.sharedDir, { index: false }));
-  app.use(express.static(config.publicDir, { index: 'index.html' }));
+  // TypeScript sources are never served - only the compiled client.
+  const denySources = (req, res, next) => {
+    if (req.path.endsWith('.ts')) return res.status(404).json({ error: 'not found' });
+    return next();
+  };
+  app.use('/shared', denySources, express.static(config.sharedDir, { index: false }));
+  app.use(denySources, express.static(config.publicDir, { index: 'index.html' }));
 
   app.use((req, res) => {
     res.status(404).json({ error: `no route for ${req.method} ${req.path}` });
   });
 
   const server = http.createServer(app);
-  const signaling = new SignalingServer({ server, registry, config, logger });
+  const signaling = new SignalingServer({ server, registry, config, logger, mailer, recordingStore });
 
   const listen = (port = config.port, host = config.host) =>
-    new Promise((resolve, reject) => {
+    new Promise<any>((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, () => {
         server.removeListener('error', reject);
@@ -78,10 +105,10 @@ export function createServer(options = {}) {
     registry.stopSweeper();
     await signaling.close();
     await registry.dispose();
-    await new Promise((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   };
 
-  return { app, server, config, registry, recordingStore, signaling, listen, close };
+  return { app, server, config, registry, recordingStore, signaling, mailer, listen, close };
 }
 
 async function main() {

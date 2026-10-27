@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createServer } from '../server/index.js';
-import { loadConfig } from '../server/config.js';
+import { createServer } from '../server/index.ts';
+import { loadConfig } from '../server/config.ts';
 
 const silent = { info() {}, warn() {}, error() {} };
 
@@ -44,6 +44,10 @@ test('capabilities advertise every platform, preset and overlay', async () => {
   assert.deepEqual(body.overlayTypes, ['title', 'announcement', 'screenshare', 'song', 'break', 'ended']);
   assert.ok(body.presets.length >= 5);
   assert.equal(body.websocketPath, '/ws');
+  assert.deepEqual(body.roles, ['host', 'cohost', 'viewer', 'visitor']);
+  assert.deepEqual(body.passwordRoles, ['host', 'cohost']);
+  assert.ok(body.minPasswordLength >= 4);
+  assert.equal(body.maxBreakouts, 8);
 });
 
 test('rooms can be created, listed, fetched and deleted', async () => {
@@ -118,4 +122,42 @@ test('the studio UI and its shared modules are served', async () => {
   assert.match(protocol, /SCENE_TYPES/);
 
   assert.equal((await fetch(`${base}/api/unknown`)).status, 404);
+});
+
+test('a room snapshot exposes its breakout state', async () => {
+  await fetch(`${base}/api/rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: 'split', name: 'Split room' }),
+  });
+
+  const room = await (await fetch(`${base}/api/rooms/split`)).json();
+  assert.deepEqual(room.room.breakouts.rooms, []);
+  assert.equal(room.room.breakouts.available, true);
+  assert.equal(room.room.breakouts.max, 8);
+  assert.equal(room.room.breakouts.active, false);
+
+  // Breakout rooms are never listed as rooms of their own.
+  const list = await (await fetch(`${base}/api/rooms`)).json();
+  assert.equal(list.rooms.some((entry) => entry.id === 'split-b1'), false);
+
+  await fetch(`${base}/api/rooms/split`, { method: 'DELETE' });
+});
+
+test('room creation hands the role passwords to the creator only', async () => {
+  const created = await fetch(`${base}/api/rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: 'keyed', hostPassword: 'hostpass', cohostPassword: 'cohostpass' }),
+  });
+  assert.equal(created.status, 201);
+  const body = await created.json();
+  assert.deepEqual(body.credentials, { hostPassword: 'hostpass', cohostPassword: 'cohostpass' });
+  assert.equal(body.room.room.requiresHostPassword, true);
+
+  const fetched = await (await fetch(`${base}/api/rooms/keyed`)).json();
+  assert.ok(!JSON.stringify(fetched).includes('hostpass'), 'the snapshot never leaks the host password');
+  assert.ok(!JSON.stringify(fetched).includes('cohostpass'), 'the snapshot never leaks the co-host password');
+
+  await fetch(`${base}/api/rooms/keyed`, { method: 'DELETE' });
 });

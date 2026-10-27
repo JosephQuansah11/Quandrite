@@ -89,7 +89,7 @@ function clampDuration(value, fallback) {
  * Validate + normalise an overlay request.
  * @returns {{ok: true, value: object} | {ok: false, errors: string[]}}
  */
-export function validateOverlay(input = {}) {
+export function validateOverlay(input: any = {}) {
   const type = String(input.type || '').trim().toLowerCase();
   const definition = OVERLAY_DEFINITIONS[type];
   if (!definition) {
@@ -98,7 +98,7 @@ export function validateOverlay(input = {}) {
 
   const raw = input.payload && typeof input.payload === 'object' ? input.payload : {};
   const errors = [];
-  const payload = {};
+  const payload: any = {};
 
   switch (type) {
     case 'title': {
@@ -174,7 +174,7 @@ let overlayCounter = 0;
  * Create the scene object stored on the studio.
  * @returns {{ok: true, value: object} | {ok: false, errors: string[]}}
  */
-export function createOverlay(input = {}, { now = Date.now(), idFactory } = {}) {
+export function createOverlay(input: any = {}, { now = Date.now(), idFactory }: any = {}) {
   const validated = validateOverlay(input);
   if (!validated.ok) return validated;
   const { type, payload, durationMs, persistent, blocksProgram } = validated.value;
@@ -226,7 +226,7 @@ export function formatCountdown(ms) {
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
 }
 
-const rect = (x, y, w, h, fill, extra = {}) => ({
+const rect = (x, y, w, h, fill, extra: any = {}) => ({
   kind: 'rect',
   x: Math.round(x),
   y: Math.round(y),
@@ -236,7 +236,7 @@ const rect = (x, y, w, h, fill, extra = {}) => ({
   ...extra,
 });
 
-const text = (x, y, value, extra = {}) => ({
+const text = (x, y, value, extra: any = {}) => ({
   kind: 'text',
   x: Math.round(x),
   y: Math.round(y),
@@ -484,7 +484,7 @@ const DRAWERS = Object.freeze({
  * uses `blocksProgram` to know whether camera / screen pixels are still
  * visible underneath the overlay.
  */
-export function overlayDrawModel(scene, { width, height } = {}) {
+export function overlayDrawModel(scene, { width, height }: any = {}) {
   const W = Math.max(1, Math.round(width || 1280));
   const H = Math.max(1, Math.round(height || 720));
   const definition = scene ? OVERLAY_DEFINITIONS[scene.type] : null;

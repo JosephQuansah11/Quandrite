@@ -117,7 +117,7 @@ export function validateRtmpUrl(url) {
  * Build the concrete RTMP(S) URL ffmpeg should connect to.
  * @returns {{ok: true, url: string} | {ok: false, error: string}}
  */
-export function resolveIngestUrl({ platform, streamKey = '', overrideUrl = '' } = {}) {
+export function resolveIngestUrl({ platform, streamKey = '', overrideUrl = '' }: any = {}) {
   const preset = getPlatform(platform);
   if (!preset) return { ok: false, error: `unknown platform: ${platform}` };
 
@@ -141,7 +141,7 @@ export function resolveIngestUrl({ platform, streamKey = '', overrideUrl = '' } 
  * Validate a destination as supplied by a client.
  * @returns {{ok: true, value: object} | {ok: false, errors: string[]}}
  */
-export function validateDestination(input = {}) {
+export function validateDestination(input: any = {}) {
   const errors = [];
   const platform = String(input.platform || '').trim().toLowerCase();
   const preset = getPlatform(platform);
@@ -157,7 +157,7 @@ export function validateDestination(input = {}) {
     if (preset.requiresOverrideUrl && !overrideUrl) {
       errors.push(`${preset.name} requires a full ingest URL`);
     } else {
-      const resolved = resolveIngestUrl({ platform, streamKey, overrideUrl });
+      const resolved: any = resolveIngestUrl({ platform, streamKey, overrideUrl });
       if (!resolved.ok) errors.push(resolved.error);
       else url = resolved.url;
     }

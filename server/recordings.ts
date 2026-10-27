@@ -10,12 +10,12 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { buildProbeArgs, buildRemuxArgs, parseDurationSeconds } from './ffmpeg.js';
+import { buildProbeArgs, buildRemuxArgs, parseDurationSeconds } from './ffmpeg.ts';
 
 const INDEX_FILE = 'index.json';
 
 /** Run an ffmpeg command and collect its output. Never rejects on exit code. */
-export function runFfmpeg(bin, args, { timeoutMs = 60000 } = {}) {
+export function runFfmpeg(bin, args, { timeoutMs = 60000 }: any = {}): Promise<any> {
   return new Promise((resolve) => {
     let child;
     try {
@@ -64,7 +64,16 @@ function safeSegment(value, fallback = 'room') {
 }
 
 export class RecordingStore {
-  constructor({ dir, ffmpegBin, remuxToMp4 = true, logger = console } = {}) {
+
+  // --- state (typed loosely while the class is migrated) ---
+  _writeChain: any;
+  dir: any;
+  entries: any;
+  ffmpegBin: any;
+  loaded: any;
+  logger: any;
+  remuxToMp4: any;
+  constructor({ dir, ffmpegBin, remuxToMp4 = true, logger = console }: any = {}) {
     if (!dir) throw new Error('RecordingStore requires a directory');
     this.dir = dir;
     this.ffmpegBin = ffmpegBin;
@@ -107,7 +116,7 @@ export class RecordingStore {
   }
 
   /** Register a new recording before the relay starts writing to it. */
-  async create({ roomId, roomName, format = 'mkv', destinations = [], preset = null } = {}) {
+  async create({ roomId, roomName, format = 'mkv', destinations = [], preset = null }: any = {}) {
     await this.load();
     const now = new Date();
     const id = randomUUID();
@@ -136,7 +145,7 @@ export class RecordingStore {
     return this.entries.find((entry) => entry.id === id) || null;
   }
 
-  list({ roomId } = {}) {
+  list({ roomId }: any = {}) {
     const sorted = [...this.entries].sort((a, b) => b.createdAt - a.createdAt);
     return roomId ? sorted.filter((entry) => entry.roomId === roomId) : sorted;
   }
@@ -153,7 +162,7 @@ export class RecordingStore {
    * Mark a recording finished: measure it, optionally remux to MP4 and store
    * the final metadata.
    */
-  async finalize(id, { remux } = {}) {
+  async finalize(id, { remux }: any = {}) {
     await this.load();
     const entry = this.get(id);
     if (!entry) return null;

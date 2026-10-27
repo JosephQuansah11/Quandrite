@@ -8,15 +8,25 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "prestart": "npm run build",
+    "start": "node server/index.ts",
+    "dev": "node --watch server/index.ts",
+    "pretest": "npm run build",
     "test": "node --test --test-concurrency=1",
-    "test:unit": "node --test --test-concurrency=1 test/overlays.test.js test/destinations.test.js test/layout.test.js test/ffmpeg.test.js test/studio.test.js test/api.test.js test/signaling.test.js",
-    "test:e2e": "node --test test/relay-e2e.test.js"
+    "test:unit": "node --test --test-concurrency=1 test/overlays.test.ts test/destinations.test.ts test/layout.test.ts test/ffmpeg.test.ts test/studio.test.ts test/api.test.ts test/signaling.test.ts test/wiring.test.ts test/mailer.test.ts",
+    "test:e2e": "node --test test/relay-e2e.test.ts"
   },
   "dependencies": {
     "express": "^5.3.0",
     "ffmpeg-static": "^5.3.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "typescript": "^5.9.3"
   }
 }

@@ -1,9 +1,12 @@
 /** Tiny DOM helpers shared by the browser modules. */
 
-export const $ = (selector, root = document) => root.querySelector(selector);
-export const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+// The helpers are deliberately loosely typed: they accept any selector and
+// return the element as-is, so callers can use the specific properties they
+// know about (`value`, `dataset`, `classList`, ...).
+export const $ = (selector: string, root: ParentNode = document): any => root.querySelector(selector);
+export const $$ = (selector: string, root: ParentNode = document): any[] => [...root.querySelectorAll(selector)];
 
-export function el(tag, props = {}, children = []) {
+export function el(tag: string, props: Record<string, any> = {}, children: any[] = []): any {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
     if (value === null || value === undefined) continue;
@@ -54,10 +57,23 @@ export function fmtTime(ts) {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-export function toast(message, kind = 'info') {
+export function toast(message, kind = 'info', { actionLabel = null, onAction = null, timeoutMs = null }: any = {}) {
   const host = document.getElementById('toasts');
   if (!host) return;
   const node = el('div', { class: `toast ${kind === 'info' ? '' : kind}`, text: message });
+  if (actionLabel && typeof onAction === 'function') {
+    node.append(
+      el('button', {
+        class: 'tiny primary',
+        text: actionLabel,
+        onclick: () => {
+          node.remove();
+          onAction();
+        },
+      }),
+    );
+  }
   host.append(node);
-  setTimeout(() => node.remove(), kind === 'error' ? 9000 : 5000);
+  const ttl = timeoutMs ?? (kind === 'error' ? 9000 : actionLabel ? 12000 : 5000);
+  setTimeout(() => node.remove(), ttl);
 }

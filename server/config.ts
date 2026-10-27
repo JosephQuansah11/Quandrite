@@ -55,7 +55,7 @@ export function resolveFfmpegBin(explicit) {
   return 'ffmpeg';
 }
 
-export function loadConfig(overrides = {}) {
+export function loadConfig(overrides: any = {}) {
   const recordingsDir =
     overrides.recordingsDir ||
     process.env.QUANDRITE_RECORDINGS_DIR ||
@@ -63,8 +63,9 @@ export function loadConfig(overrides = {}) {
 
   const base = {
     rootDir,
-    publicDir: path.join(rootDir, 'public'),
-    sharedDir: path.join(rootDir, 'shared'),
+    // The browser only ever sees the compiled client in `build/`.
+    publicDir: path.join(rootDir, 'build', 'public'),
+    sharedDir: path.join(rootDir, 'build', 'shared'),
     recordingsDir,
     host: process.env.QUANDRITE_HOST || '0.0.0.0',
     port: intEnv('PORT', intEnv('QUANDRITE_PORT', 8080)),
@@ -75,6 +76,15 @@ export function loadConfig(overrides = {}) {
     remuxRecordingToMp4: process.env.QUANDRITE_REMUX_MP4 !== '0',
     audioBitrateKbps: intEnv('QUANDRITE_AUDIO_KBPS', 160),
     chatLimit: intEnv('QUANDRITE_CHAT_LIMIT', 500),
+    // Role passwords. Empty means "let each room generate its own".
+    hostPassword: process.env.QUANDRITE_HOST_PASSWORD || '',
+    cohostPassword: process.env.QUANDRITE_COHOST_PASSWORD || '',
+    maxBreakouts: intEnv('QUANDRITE_MAX_BREAKOUTS', 8),
+    // Mail: the host password is emailed instead of only shown on screen.
+    mailFrom: process.env.QUANDRITE_MAIL_FROM || 'Quandrite <no-reply@quandrite.local>',
+    smtpUrl: process.env.QUANDRITE_SMTP_URL || '',
+    mailWebhook: process.env.QUANDRITE_MAIL_WEBHOOK || '',
+    publicUrl: process.env.QUANDRITE_PUBLIC_URL || '',
     maxRooms: intEnv('QUANDRITE_MAX_ROOMS', 200),
     maxSourcesPerRoom: intEnv('QUANDRITE_MAX_SOURCES', 24),
     maxDestinationsPerRoom: intEnv('QUANDRITE_MAX_DESTINATIONS', 8),

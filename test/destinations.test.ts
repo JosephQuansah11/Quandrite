@@ -10,7 +10,7 @@ import {
   resolveIngestUrl,
   validateDestination,
   validateRtmpUrl,
-} from '../shared/destinations.js';
+} from '../shared/destinations.ts';
 
 test('the four requested platforms plus custom ingests are available', () => {
   const ids = listPlatforms().map((platform) => platform.id);
@@ -47,8 +47,8 @@ test('a regional url override replaces the built-in base url', () => {
 
 test('unknown platforms and missing keys are rejected', () => {
   assert.equal(resolveIngestUrl({ platform: 'nope', streamKey: 'x' }).ok, false);
-  assert.match(resolveIngestUrl({ platform: 'youtube', streamKey: '' }).error, /stream key/);
-  assert.match(resolveIngestUrl({ platform: 'custom' }).error, /requires a full ingest URL/);
+  assert.match((resolveIngestUrl({ platform: 'youtube', streamKey: '' }) as any).error, /stream key/);
+  assert.match((resolveIngestUrl({ platform: 'custom' }) as any).error, /requires a full ingest URL/);
 });
 
 test('rtmp url validation', () => {

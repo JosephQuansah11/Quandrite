@@ -15,6 +15,19 @@ const MIME_CANDIDATES = [
 ];
 
 export class StreamPublisher extends EventTarget {
+
+  // --- state (typed loosely while the class is migrated) ---
+  audioBitsPerSecond: any;
+  bytes: any;
+  chunks: any;
+  compositor: any;
+  dropped: any;
+  logger: any;
+  recorder: any;
+  socket: any;
+  startedAt: any;
+  timesliceMs: any;
+  videoBitsPerSecond: any;
   constructor({
     socket,
     compositor,
@@ -22,7 +35,7 @@ export class StreamPublisher extends EventTarget {
     audioBitsPerSecond = 160_000,
     timesliceMs = 500,
     logger = console,
-  } = {}) {
+  }: any = {}) {
     super();
     this.socket = socket;
     this.compositor = compositor;
