@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Quandrite Studio</title>
+    <meta name="description" content="Quandrite - chat, meetings and multi-platform livestreaming studio" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">Q</span>
+        <div>
+          <strong>Quandrite</strong>
+          <small>meetings &middot; chat &middot; multistream</small>
+        </div>
+      </div>
+
+      <form id="join-form" class="join-form">
+        <input id="join-name" name="name" placeholder="Your name" autocomplete="name" required />
+        <input id="join-room" name="room" placeholder="Room code" autocomplete="off" required />
+        <select id="join-role" name="role" title="Join as">
+          <option value="host">Host</option>
+          <option value="cohost">Co-host</option>
+          <option value="viewer" selected>Viewer</option>
+        </select>
+        <button type="submit" class="primary">Join</button>
+      </form>
+
+      <div class="status-cluster">
+        <span id="connection-pill" class="pill offline">offline</span>
+        <span id="role-pill" class="pill">guest</span>
+        <span id="live-pill" class="pill">off air</span>
+        <span id="rec-pill" class="pill">not recording</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="stage">
+        <div class="panel program-panel">
+          <div class="panel-head">
+            <h2>Program preview <small>(what your viewers receive)</small></h2>
+            <div class="program-meta">
+              <span id="program-preset">1080p30</span>
+              <span id="program-bitrate">0 kbps</span>
+              <span id="program-uptime">00:00</span>
+            </div>
+          </div>
+          <div class="program-frame">
+            <canvas id="program-canvas" width="1920" height="1080"></canvas>
+            <div class="program-overlay-badges">
+              <span id="canvas-live-badge" class="badge live hidden">LIVE</span>
+              <span id="canvas-rec-badge" class="badge rec hidden">REC</span>
+            </div>
+            <div id="program-empty" class="empty-hint">
+              Add a camera or share your screen to build the program picture.
+            </div>
+          </div>
+          <div class="program-controls">
+            <div class="segmented" id="program-mode">
+              <button data-mode="single" class="active">Single camera</button>
+              <button data-mode="grid">All cameras</button>
+              <button data-mode="screenshare">Screen</button>
+            </div>
+            <span id="on-air-label" class="muted">On air: -</span>
+          </div>
+        </div>
+
+        <div class="panel sources-panel">
+          <div class="panel-head">
+            <h2>Cameras &amp; screens <small id="source-count">(0)</small></h2>
+            <div class="source-actions">
+              <button id="btn-add-camera" class="primary">Add camera</button>
+              <button id="btn-add-all-cameras" class="ghost">Add all cameras</button>
+              <button id="btn-share-screen" class="ghost">Share screen</button>
+              <label class="toggle" title="Include system audio in the screen share">
+                <input id="screen-audio" type="checkbox" checked />
+                <span>with sound</span>
+              </label>
+              <button id="btn-pair-bluetooth" class="ghost" title="Pair a Bluetooth camera (phone, action cam)">
+                Pair Bluetooth
+              </button>
+            </div>
+          </div>
+          <div id="device-list" class="device-list"></div>
+          <div id="source-grid" class="source-grid">
+            <p class="muted">No sources yet.</p>
+          </div>
+        </div>
+      </section>
+
+      <aside class="sidebar">
+        <nav class="tabs" id="tabs">
+          <button data-tab="scenes" class="active">Scenes</button>
+          <button data-tab="platforms">Go live</button>
+          <button data-tab="chat">Chat</button>
+          <button data-tab="meeting">Meeting</button>
+          <button data-tab="recordings">Library</button>
+        </nav>
+
+        <div class="tab-panel" data-panel="scenes">
+          <div class="scene-buttons" id="scene-buttons"></div>
+          <form id="scene-form" class="form"></form>
+          <button id="btn-clear-scene" class="ghost wide">Clear overlay</button>
+          <div id="scene-current" class="scene-current muted">No overlay on air.</div>
+        </div>
+
+        <div class="tab-panel hidden" data-panel="platforms">
+          <form id="destination-form" class="form">
+            <label>Platform
+              <select id="destination-platform" required></select>
+            </label>
+            <label>Stream key
+              <input id="destination-key" type="password" autocomplete="off" placeholder="paste the key from the platform" />
+            </label>
+            <label>Ingest URL override <small>(optional)</small>
+              <input id="destination-url" type="text" autocomplete="off" placeholder="rtmp:// or rtmps://" />
+            </label>
+            <label>Label <small>(optional)</small>
+              <input id="destination-label" type="text" placeholder="e.g. Main YouTube channel" />
+            </label>
+            <p id="destination-help" class="muted"></p>
+            <button type="submit" class="primary wide">Add destination</button>
+          </form>
+
+          <ul id="destination-list" class="list"></ul>
+
+          <div class="broadcast-box">
+            <label>Video quality
+              <select id="stream-preset"></select>
+            </label>
+            <label class="toggle">
+              <input id="stream-record" type="checkbox" checked />
+              <span>Record this broadcast</span>
+            </label>
+            <div class="row">
+              <button id="btn-go-live" class="primary">Go live</button>
+              <button id="btn-stop-live" class="ghost" disabled>End stream</button>
+            </div>
+            <div id="stream-status" class="stream-status muted">Off air.</div>
+          </div>
+        </div>
+
+        <div class="tab-panel hidden" data-panel="chat">
+          <div id="chat-log" class="chat-log"></div>
+          <form id="chat-form" class="chat-form">
+            <input id="chat-input" placeholder="Message the room" autocomplete="off" />
+            <button type="submit" class="primary">Send</button>
+          </form>
+        </div>
+
+        <div class="tab-panel hidden" data-panel="meeting">
+          <div class="row wrap">
+            <button id="btn-join-call" class="primary">Join call</button>
+            <button id="btn-leave-call" class="ghost" disabled>Leave</button>
+            <button id="btn-toggle-mic" class="ghost" disabled>Mute</button>
+            <button id="btn-toggle-cam" class="ghost" disabled>Camera off</button>
+          </div>
+          <ul id="member-list" class="list"></ul>
+          <div id="remote-grid" class="remote-grid"></div>
+        </div>
+
+        <div class="tab-panel hidden" data-panel="recordings">
+          <button id="btn-refresh-recordings" class="ghost wide">Refresh library</button>
+          <ul id="recording-list" class="list"></ul>
+        </div>
+      </aside>
+    </main>
+
+    <div id="toasts" class="toasts"></div>
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>
