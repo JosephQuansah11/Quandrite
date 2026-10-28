@@ -1,5 +1,7 @@
 node_modules/
 recordings/
+# Pictures sent in chat: runtime data, like the recordings.
+uploads/
 *.log
 .env
 

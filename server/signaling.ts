@@ -7,8 +7,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { CLIENT, SERVER, PROTOCOL_VERSION, RELAY_MAX_FPS, canControlBroadcast, decodeRelayFrame, encodeRelayFrame, isRelayFrame, validateEnvelope } from '../shared/protocol.ts';
+import { CHAT_ATTACHMENT_TYPES, CLIENT, MAX_CHAT_ATTACHMENT_BYTES, SERVER, PROTOCOL_VERSION, RELAY_AUDIO_BURST, RELAY_AUDIO_MAX_FPS, RELAY_MAX_FPS, RELAY_WARM_FRAMES, RELAY_WARM_MAX_AGE_MS, canControlBroadcast, decodeRelayFrame, encodeRelayFrame, isRelayFrame, monotonicNs, nsToWire, validateEnvelope } from '../shared/protocol.ts';
 import { OVERLAY_DEFINITIONS, REQUESTABLE_OVERLAY_TYPES } from '../shared/overlays.ts';
 import { listPlatforms } from '../shared/destinations.ts';
 
@@ -20,6 +22,8 @@ export class SignalingServer {
   logger: any;
   registry: any;
   roomClients: any;
+  /** The newest picture from each source, per room, so a newcomer sees the room. */
+  relayFrames: any;
   sessions: any;
   wss: any;
   mailer: any;
@@ -40,6 +44,8 @@ export class SignalingServer {
     this.recordingStore = recordingStore;
     this.sessions = new Map();
     this.roomClients = new Map();
+    // The newest picture from each source, per room, for whoever joins next.
+    this.relayFrames = new Map();
 
     this.wss = new WebSocketServer({ server, path, maxPayload: config.maxChunkBytes });
     this.wss.on('connection', (socket, request) => this._onConnection(socket, request));
@@ -141,13 +147,40 @@ export class SignalingServer {
     studio.__quandriteBound = true;
     const emit = (type, payload) => this._broadcast(studio.id, { type, payload });
 
+    /**
+     * A chat message, delivered to whoever it is for.
+     *
+     * A private message goes to exactly two people - the one who sent it and the one it
+     * is for - and to nobody else, which is why the delivery is decided here rather than
+     * in a broadcast. Everything else is the room's conversation.
+     */
+    const chat = (message) => {
+      if (message?.to) {
+        for (const memberId of [message.authorId, message.to]) {
+          const target = this.sessions.get(memberId);
+          if (target && target.studio === studio) {
+            this._send(target, { type: SERVER.CHAT_NEW, payload: message });
+          }
+        }
+        return;
+      }
+      emit(SERVER.CHAT_NEW, message);
+    };
+
     if (studio.isBreakout) {
-      studio.on('chat', (message) => emit(SERVER.CHAT_NEW, message));
+      // A breakout is a room of its own: its chat, and its **own primary screen**. What
+      // happens here is broadcast here and nowhere else - the parent's program is a
+      // separate thing, and it keeps travelling to everyone as `sources:update` and
+      // friends.
+      studio.on('chat', chat);
+      studio.on('sources', (sources) => emit(SERVER.BREAKOUT_SOURCES, sources));
+      studio.on('program', (program) => emit(SERVER.BREAKOUT_PROGRAM, program));
+      studio.on('scene', (scene) => emit(SERVER.BREAKOUT_SCENE, scene));
       return;
     }
 
     const tree = (type, payload) => this._broadcastTree(studio.id, { type, payload });
-    studio.on('chat', (message) => emit(SERVER.CHAT_NEW, message));
+    studio.on('chat', chat);
     studio.on('members', (members) => tree(SERVER.MEMBERS_UPDATE, members));
     studio.on('breakouts', (state) => {
       tree(SERVER.BREAKOUTS_UPDATE, state);
@@ -200,8 +233,9 @@ export class SignalingServer {
   }
 
   /**
-   * The room a session should be in: its member's open breakout, or the main
-   * room. Assignments survive a close, so reopening puts people back.
+   * The room a session should be in: the breakout its member walked into, or the main
+   * room. The assignment the host made is a suggestion shown in the picker - it does not
+   * move anybody, which is what makes choosing a room the participant's own decision.
    */
   _desiredRoomId(session) {
     const studio = session.studio;
@@ -245,23 +279,15 @@ export class SignalingServer {
     session.breakoutId = roomId === studio.id ? null : roomId;
 
     const chatRoom = target || studio;
-    // The room you walk into sees you arrive, so a breakout is never silent.
-    if (chatRoom !== studio) {
-      chatRoom.addChat({
-        authorId: 'system',
-        authorName: 'Quandrite',
-        kind: 'system',
-        text: `${session.name} joined the room`,
-      });
-    } else if (previousRoomId && previousRoomId !== roomId) {
-      const previous = this.registry.get(previousRoomId);
-      previous?.addChat({
-        authorId: 'system',
-        authorName: 'Quandrite',
-        kind: 'system',
-        text: `${session.name} left the room`,
-      });
-    }
+    // A breakout has a roster of its own, so the people standing in it can publish into
+    // it - that is what gives the room its own screen. A plain `viewer` role is claimed:
+    // what somebody may do in the *broadcast* is decided by the parent's roster, and
+    // nobody should be asked for a password to walk into a breakout.
+    const previous = previousRoomId && previousRoomId !== roomId ? this.registry.get(previousRoomId) : null;
+    // Walking out of a breakout takes you off that room's roster - and its screen with
+    // it. The parent is never left: the session is still in the room.
+    if (previous && previous !== studio) previous.leave?.(session.id);
+    if (chatRoom !== studio) chatRoom.join({ clientId: session.id, name: session.name, role: 'viewer' });
 
     this._send(session, {
       type: SERVER.BREAKOUT_UPDATE,
@@ -272,6 +298,12 @@ export class SignalingServer {
         // The studio state always comes from the parent; the chat comes from
         // the room the session just walked into.
         state: { ...studio.snapshot(), chat: chatRoom.chat.slice(-100) },
+        // ...and the room's own primary screen, so the stage is right immediately.
+        roomState: {
+          sources: chatRoom.sourcesSnapshot?.() ?? [],
+          program: chatRoom.programSnapshot?.() ?? null,
+          scene: chatRoom.sceneSnapshot?.() ?? null,
+        },
       },
     });
   }
@@ -327,13 +359,44 @@ export class SignalingServer {
     return true;
   }
 
-  /** The room a session's chat belongs to: its breakout, or the main room. */
-  _chatRoomFor(session) {
+  /**
+   * The room a session's media, chat and screen belong to: its breakout, or the parent.
+   *
+   * A breakout is a real room - its own chat, its own sources, its own program - so
+   * everything a session does with the room it is standing in goes here. What stays with
+   * the parent is the *broadcast*: the picture that goes to the platforms, which a host
+   * runs from wherever they are.
+   */
+  _roomFor(session) {
     if (!session.breakoutId) return session.studio;
     const room = this.registry.get(session.breakoutId);
     if (!room) return session.studio;
     this._attachRoom(room);
     return room;
+  }
+
+  /** The same question, asked without an error: may this session drive that screen? */
+  _hasControl(session) {
+    const role = session.studio?.getMember(session.id)?.role ?? session.role;
+    return canControlBroadcast(role);
+  }
+
+  /**
+   * May this session set the program of `room`?
+   *
+   * The broadcast is the host's and the co-hosts'. A **breakout's** screen is a shared
+   * table instead: anybody in the room may put *their own* sources on it - that is what
+   * "share your screen with this group" means - and only a host or co-host may move
+   * anybody else's.
+   */
+  _mayDriveProgram(session, room, message) {
+    if (room === session.studio) return this._hasControl(session);
+    if (this._hasControl(session)) return true;
+    const ids = [message.sourceId, ...(Array.isArray(message.gridIds) ? message.gridIds : [])].filter(Boolean);
+    // A bare mode change is not "share my screen": it is a decision about the room, so
+    // it needs control.
+    if (!ids.length) return false;
+    return ids.every((id) => room.sources.get(id)?.ownerId === session.id);
   }
 
   async _handleJoin(session, message, id) {
@@ -397,7 +460,55 @@ export class SignalingServer {
 
     // A member who reconnects into an open breakout room goes back there.
     this._syncBreakoutSessions(studio);
+    // Whatever the room is already showing, hand it over now: a newcomer should
+    // open onto the room, not onto empty tiles waiting for the next frame.
+    this._sendWarmFrames(session, session.attendedRoomId || studio.id);
+    // Private conversations are mine: nobody else is sent them, and a reload should not
+    // lose one.
+    this._send(session, {
+      type: SERVER.CHAT_HISTORY,
+      payload: { threads: studio.privateThreadsFor(session.id) },
+    });
     return undefined;
+  }
+
+  /**
+   * Accept a chat picture only if this server stored it for this room.
+   *
+   * A message carries a URL rather than the picture itself, and a URL from a client is
+   * never trusted: it has to be one of ours (`/uploads/<room>-<random>.<ext>`), the file
+   * has to exist, and it has to be a picture of a sane size. That keeps a message from
+   * pointing at somebody else's server - a tracking pixel in a chat room is not a
+   * feature - and keeps the room's storage to what the room actually sent.
+   */
+  _acceptAttachment(session, attachment) {
+    if (!attachment || typeof attachment !== 'object') return null;
+    const studio = session.studio;
+    if (!studio || !this.config?.uploadsDir) return null;
+    const url = String(attachment.url || '');
+    const prefix = `/uploads/${studio.id}-`;
+    if (!url.startsWith(prefix)) return null;
+    // Rebuild from the file name: nothing a client sends can walk out of the directory.
+    const file = path.basename(url.slice(prefix.length));
+    if (!file || file !== url.slice(prefix.length)) return null;
+    const full = path.join(this.config.uploadsDir, `${studio.id}-${file}`);
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      return null;
+    }
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_CHAT_ATTACHMENT_BYTES) return null;
+    const mime = String(attachment.mime || '');
+    if (!CHAT_ATTACHMENT_TYPES.includes(mime)) return null;
+    return {
+      url: `/uploads/${studio.id}-${file}`,
+      name: String(attachment.name || 'picture').replace(/[\r\n\t]/g, ' ').slice(0, 80),
+      mime,
+      bytes: stat.size,
+      width: Math.max(0, Math.min(20000, Number(attachment.width) || 0)),
+      height: Math.max(0, Math.min(20000, Number(attachment.height) || 0)),
+    };
   }
 
   /** Binary frames are either the program feed or a relayed picture. */
@@ -411,34 +522,98 @@ export class SignalingServer {
   }
 
   /**
-   * A camera or screen picture relayed over the socket.
+   * A camera, screen or microphone feed relayed over the socket.
    *
    * Peer-to-peer is always tried first; when two networks will not let the
    * browsers reach each other (strict NAT, corporate Wi-Fi, mobile data), the
-   * room still has to see the picture - so the sender posts low-rate JPEG frames
-   * here and the server fans them out to the room it is in.
+   * room still has to see and hear the room - so the sender posts low-rate JPEG
+   * pictures and 20 ms slices of PCM here and the server fans them out.
+   *
+   * Pictures and voice get separate budgets: voice is small but needs a steady
+   * 50 frames a second, while pictures are big and are deliberately thinned out.
    */
   _onRelayFrame(session, buffer) {
     const studio = session.studio;
     if (!studio) return;
+    // Stamp the frame with the server's own clock before anything else, so the
+    // room can tell the two hops apart in nanoseconds: how long it took to get
+    // here, and how long it takes to get out again.
+    const arrivedNs = monotonicNs();
     const decoded = decodeRelayFrame(buffer);
     if (!decoded) return;
 
-    // A relay is a fallback, not a second full-quality feed.
+    // A relay is a fallback, not a second full-quality feed. Pictures get a hard
+    // interval; voice gets a small burst allowance, because browser audio
+    // callbacks jitter and a dropped slice is a click in someone's ear.
     const now = Date.now();
-    if (now - (session.lastRelayAt || 0) < 1000 / RELAY_MAX_FPS) return;
-    session.lastRelayAt = now;
+    const isAudio = decoded.header?.kind === 'audio';
+    if (isAudio) {
+      const bucket = session.relayAudioTokens || (session.relayAudioTokens = { tokens: RELAY_AUDIO_BURST, at: now });
+      bucket.tokens = Math.min(
+        RELAY_AUDIO_BURST,
+        bucket.tokens + ((now - bucket.at) / 1000) * RELAY_AUDIO_MAX_FPS,
+      );
+      bucket.at = now;
+      if (bucket.tokens < 1) return;
+      bucket.tokens -= 1;
+    } else {
+      if (now - (session.lastRelayAt || 0) < 1000 / RELAY_MAX_FPS) return;
+      session.lastRelayAt = now;
+    }
 
     const frame = encodeRelayFrame(
-      { ...decoded.header, from: session.id, fromName: session.name },
+      { ...decoded.header, from: session.id, fromName: session.name, srv: nsToWire(arrivedNs) },
       decoded.payload,
     );
     const roomId = session.attendedRoomId || studio.id;
+    this._rememberRelayFrame(roomId, decoded.header, frame);
     for (const clientId of this.roomClients.get(roomId) || []) {
       if (clientId === session.id) continue;
       const target = this.sessions.get(clientId);
       if (target?.socket?.readyState === 1) target.socket.send(frame);
     }
+  }
+
+  /**
+   * Keep the newest picture from each source, so somebody joining a live room does
+   * not stare at an empty tile until the next frame happens to arrive.
+   */
+  _rememberRelayFrame(roomId, header, frame) {
+    if (!roomId) return;
+    const cache = this.relayFrames.get(roomId) || new Map();
+    this.relayFrames.set(roomId, cache);
+    cache.set(header?.sourceId || `peer:${header?.from}`, { frame, at: Date.now() });
+    while (cache.size > RELAY_WARM_FRAMES) {
+      let oldestKey = null;
+      let oldestAt = Infinity;
+      for (const [key, entry] of cache) {
+        if (entry.at < oldestAt) {
+          oldestAt = entry.at;
+          oldestKey = key;
+        }
+      }
+      if (oldestKey === null) break;
+      cache.delete(oldestKey);
+    }
+  }
+
+  /** Hand a newcomer the room as it is, not as it will be in a moment. */
+  _sendWarmFrames(session, roomId) {
+    const cache = this.relayFrames.get(roomId);
+    if (!cache || session.socket?.readyState !== 1) return 0;
+    const now = Date.now();
+    let sent = 0;
+    for (const entry of cache.values()) {
+      if (now - entry.at > RELAY_WARM_MAX_AGE_MS) continue;
+      const decoded = decodeRelayFrame(entry.frame);
+      if (!decoded) continue;
+      // Marked as a still: it is older than the live rule allows, and that is the
+      // point - it is what the room looked like a moment ago.
+      const warm = encodeRelayFrame({ ...decoded.header, warm: true }, decoded.payload);
+      session.socket.send(warm);
+      sent += 1;
+    }
+    return sent;
   }
 
   /** Binary frames are the program feed produced by the host compositor. */
@@ -529,14 +704,48 @@ export class SignalingServer {
       case CLIENT.PING:
         this._send(session, { type: SERVER.PONG, at: Date.now(), id });
         return undefined;
+      /**
+       * The clock exchange behind the relay's nanosecond stamps.
+       *
+       * The reply carries the server's monotonic clock twice - on receipt and on
+       * send - so the client can subtract half the round trip and know its offset.
+       * Answered before anything else, because the round trip is the error bound.
+       */
+      case CLIENT.TIME_SYNC: {
+        const onReceipt = monotonicNs();
+        this._send(session, {
+          type: SERVER.TIME_SYNC,
+          id,
+          t1: nsToWire(onReceipt),
+          t2: nsToWire(monotonicNs()),
+        });
+        return undefined;
+      }
       case CLIENT.CHAT_SEND: {
         if (!this._requireRoom(session, id)) return undefined;
         // Chat belongs to the room the session is actually in: a breakout has
         // its own conversation.
-        const posted = this._chatRoomFor(session).addChat({
+        const room = this._roomFor(session);
+        // A private message has to have somebody to be private *with*: the target must
+        // be in the same room, and it cannot be me.
+        const to = message.to ? String(message.to) : null;
+        if (to) {
+          if (to === session.id) return this._fail(session, id, 'that is you');
+          if (!room.members.has(to)) return this._fail(session, id, 'that person is not in this room');
+        }
+        // A picture has to be one this server stored for this room: a chat message can
+        // never point somewhere else.
+        const attachment = this._acceptAttachment(session, message.attachment);
+        if (message.attachment && !attachment) return this._fail(session, id, 'that picture is not available');
+
+        // A private thread belongs to the room, not to a breakout: a conversation should
+        // still be there after coming back from one.
+        const posted = (to ? session.studio : room).addChat({
           authorId: session.id,
           authorName: session.name,
           text: message.text,
+          to,
+          attachment,
         });
         if (!posted) return this._fail(session, id, 'message is empty');
         this._ack(session, id, { chatId: posted.id });
@@ -576,6 +785,14 @@ export class SignalingServer {
         this._ack(session, id, { member: result.member, breakouts: session.studio.breakoutsSnapshot() });
         return undefined;
       }
+      case CLIENT.BREAKOUT_RENAME: {
+        if (!this._requireRoom(session, id)) return undefined;
+        if (!this._requireControl(session, id)) return undefined;
+        const result = session.studio.renameBreakout(message.breakoutId, message.label);
+        if (!result.ok) return this._fail(session, id, result.error);
+        this._ack(session, id, { breakouts: result.breakouts });
+        return undefined;
+      }
       case CLIENT.BREAKOUT_SHUFFLE: {
         if (!this._requireRoom(session, id)) return undefined;
         if (!this._requireControl(session, id)) return undefined;
@@ -594,7 +811,10 @@ export class SignalingServer {
         });
         if (!result.ok) return this._fail(session, id, result.error);
         this._attachBreakouts(session.studio);
-        this._syncBreakoutSessions(session.studio);
+        // Opening the rooms does *not* move anybody: the assignment the host made is a
+        // suggestion, and walking into a room is the participant's own choice - they are
+        // told the rooms are open and pick one from the Rooms button. A host who wants
+        // somebody in a particular room moves them from the roster, which does move them.
         this._ack(session, id, { breakouts: result.breakouts });
         return undefined;
       }
@@ -680,6 +900,11 @@ export class SignalingServer {
           const member = session.studio.updateMember(memberId, patch);
           if (!member) continue;
           changed += 1;
+          // A mute of one person is a decision about them, and it holds if they come
+          // back. A sweep ("mute all") is not: it says nothing about any one person.
+          if (!message.all && patch.muted !== undefined) {
+            session.studio.rememberMute(memberId, patch.muted);
+          }
           // Tell the member's own client so it really turns the track off.
           const target = this.sessions.get(memberId);
           if (target && target.studio === session.studio) {
@@ -692,16 +917,17 @@ export class SignalingServer {
       }
       case CLIENT.SOURCE_ADD: {
         // Anyone may publish their own camera or screen; the program stays with
-        // the host and co-hosts.
+        // the host and co-hosts. It goes to the room the session is standing in, so a
+        // screen shared inside a breakout belongs to that breakout.
         if (!this._requireRoom(session, id)) return undefined;
-        const result = session.studio.addSource({ ...(message.source || {}), ownerId: session.id });
+        const result = this._roomFor(session).addSource({ ...(message.source || {}), ownerId: session.id });
         if (!result.ok) return this._fail(session, id, result.error);
         this._ack(session, id, { source: result.source });
         return undefined;
       }
       case CLIENT.SOURCE_UPDATE: {
         if (!this._requireRoom(session, id)) return undefined;
-        const result = session.studio.updateSource(message.sourceId, message.patch || {}, {
+        const result = this._roomFor(session).updateSource(message.sourceId, message.patch || {}, {
           byId: session.id,
         });
         if (!result.ok) return this._fail(session, id, result.error);
@@ -710,14 +936,26 @@ export class SignalingServer {
       }
       case CLIENT.SOURCE_REMOVE: {
         if (!this._requireRoom(session, id)) return undefined;
-        const result = session.studio.removeSource(message.sourceId, { byId: session.id });
+        const result = this._roomFor(session).removeSource(message.sourceId, { byId: session.id });
         if (!result.ok) return this._fail(session, id, result.error);
         this._ack(session, id, { removed: message.sourceId });
         return undefined;
       }
       case CLIENT.PROGRAM_SET: {
-        if (!this._requireControl(session, id)) return undefined;
-        const result = session.studio.setProgram({
+        // The broadcast needs control; a breakout's own screen does not, as long as it is
+        // your own source being put up (see `_mayDriveProgram`).
+        if (!this._requireRoom(session, id)) return undefined;
+        const room = this._roomFor(session);
+        if (!this._mayDriveProgram(session, room, message)) {
+          return this._fail(
+            session,
+            id,
+            room === session.studio
+              ? 'only the host or a co-host can control the broadcast'
+              : 'in a breakout you can put your own screen up, but not somebody else\'s',
+          );
+        }
+        const result = room.setProgram({
           mode: message.mode,
           sourceId: message.sourceId,
           gridIds: message.gridIds,

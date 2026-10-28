@@ -77,6 +77,18 @@ export function createServer(options: any = {}) {
     }),
   );
 
+  // Pictures sent in chat. The names are ours and the contents never change, so they can
+  // be cached; a directory listing is not offered.
+  app.use(
+    '/uploads',
+    express.static(config.uploadsDir, {
+      index: false,
+      dotfiles: 'deny',
+      fallthrough: true,
+      setHeaders: (res) => res.setHeader('Cache-Control', 'public, max-age=604800, immutable'),
+    }),
+  );
+
   // Shared, dependency free modules used by both the server and the browser.
   // TypeScript sources are never served - only the compiled client.
   const denySources = (req, res, next) => {

@@ -19,6 +19,7 @@ export class ProgramCompositor {
   _audioNodes: any;
   _images: any;
   _lastFrame: any;
+  _programStream: any;
   _music: any;
   _rafId: any;
   _running: any;
@@ -58,6 +59,7 @@ export class ProgramCompositor {
     this._audioNodes = new Map();
     this._music = null;
     this._images = new Map();
+    this._programStream = null;
     this._running = false;
     this._rafId = null;
     this._lastFrame = 0;
@@ -71,6 +73,10 @@ export class ProgramCompositor {
       label: source.label,
       stream: source.stream,
       video: source.video,
+      // Relayed pictures arrive as decoded frames; pass them through so a refresh
+      // never has to fall back to the "connecting..." placeholder.
+      frame: source.frame || null,
+      lastFrame: source.lastFrame || null,
       meta: source.meta || {},
     }));
     this._syncAudioGraph();
@@ -140,6 +146,12 @@ export class ProgramCompositor {
    * composited (the grid, or an overlay on air) is drawn on the canvas. That is
    * also what a viewer's picture is built from, so the room watches the same
    * real video the platforms receive.
+   *
+   * A relayed picture never becomes the outgoing track: it *is* a canvas drawing,
+   * with no track of its own. Treating it as a source of its own would flip the
+   * program between the canvas and the camera every time somebody's picture
+   * arrived over the socket - and each flip rebuilds the encoder that ffmpeg is
+   * reading, which is exactly what makes the outgoing stream blink.
    */
   programVideoTrack() {
     // An overlay has to be drawn somewhere, and the canvas is that somewhere.
@@ -147,6 +159,7 @@ export class ProgramCompositor {
     const sources = this.activeSources().filter((source) => source.kind !== 'audio');
     if (sources.length !== 1) return this.videoTrack;
     const source = sources[0];
+    if (source.meta?.relayed) return this.videoTrack;
     if (!['camera', 'screen', 'virtual'].includes(source.kind)) return this.videoTrack;
     return source.stream?.getVideoTracks?.()[0] || this.videoTrack;
   }
@@ -155,6 +168,11 @@ export class ProgramCompositor {
    * The stream handed to the publisher and to the room: the program video (a real
    * source track when there is only one, the canvas otherwise) plus the mixed
    * program audio.
+   *
+   * One `MediaStream` object is kept for as long as its tracks are the same. A new
+   * object on every call reads as "the program changed" to every peer, which makes
+   * them swap tracks for nothing - a visible blink in their preview - and this is
+   * called on every frame that arrives.
    */
   programStream() {
     if (!this.canvasStream) this.start();
@@ -163,7 +181,10 @@ export class ProgramCompositor {
     if (video) tracks.push(video);
     const audioTracks = this.audioDestination?.stream?.getAudioTracks?.() || [];
     tracks.push(...audioTracks);
-    return new MediaStream(tracks);
+    const current = this._programStream?.getTracks?.() || null;
+    const same = current && current.length === tracks.length && tracks.every((track) => current.includes(track));
+    if (!same) this._programStream = new MediaStream(tracks);
+    return this._programStream;
   }
 
   _ensureAudio() {
@@ -310,25 +331,28 @@ export class ProgramCompositor {
   }
 
   _drawTile(ctx, source, rect, W, H) {
-    const video = source.video;
-    // A relayed picture is an <img>; a live feed is a <video>. Both are drawn
-    // the same way, and neither is ever mirrored.
+    // A relayed picture carries a decoded frame (an ImageBitmap, or the previous
+    // one if the newest has not arrived); a live feed is a <video>, and its
+    // element is its frame. Everything is drawn the same way, and nothing is ever
+    // mirrored.
+    const decoded = source.frame || source.lastFrame || null;
+    const video = decoded ? null : source.video;
     const isImage = video?.tagName === 'IMG';
-    const frameWidth = isImage ? video.naturalWidth : video?.videoWidth || 0;
-    const frameHeight = isImage ? video.naturalHeight : video?.videoHeight || 0;
+    const frameWidth = decoded ? decoded.width : isImage ? video.naturalWidth : video?.videoWidth || 0;
+    const frameHeight = decoded ? decoded.height : isImage ? video.naturalHeight : video?.videoHeight || 0;
     ctx.save();
     roundRect(ctx, rect.x, rect.y, rect.w, rect.h, Math.round(H * 0.008));
     ctx.clip();
     ctx.fillStyle = '#05080f';
     ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
-    const ready = isImage ? Boolean(video.complete) && frameWidth > 0 : Boolean(video) && video.readyState >= 2 && frameWidth > 0;
+    const ready = Boolean(decoded) || (isImage ? Boolean(video.complete) && frameWidth > 0 : Boolean(video) && video.readyState >= 2 && frameWidth > 0);
     if (ready) {
       const scale = Math.max(rect.w / frameWidth, rect.h / frameHeight);
       const drawW = frameWidth * scale;
       const drawH = frameHeight * scale;
       try {
-        ctx.drawImage(video, rect.x + (rect.w - drawW) / 2, rect.y + (rect.h - drawH) / 2, drawW, drawH);
+        ctx.drawImage(decoded || video, rect.x + (rect.w - drawW) / 2, rect.y + (rect.h - drawH) / 2, drawW, drawH);
       } catch {
         // a frame may not be decodable yet
       }

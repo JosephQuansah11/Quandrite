@@ -9,14 +9,14 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && node scripts/check-client.mjs",
     "prestart": "npm run build",
     "start": "node server/index.ts",
     "predev": "npm run build",
     "dev": "node --watch server/index.ts",
     "pretest": "npm run build",
     "test": "node --test --test-concurrency=1",
-    "test:unit": "node --test --test-concurrency=1 test/overlays.test.ts test/destinations.test.ts test/layout.test.ts test/ffmpeg.test.ts test/studio.test.ts test/api.test.ts test/signaling.test.ts test/wiring.test.ts test/mailer.test.ts",
+    "test:unit": "node --test --test-concurrency=1 test/overlays.test.ts test/destinations.test.ts test/layout.test.ts test/time.test.ts test/quality.test.ts test/ffmpeg.test.ts test/studio.test.ts test/api.test.ts test/signaling.test.ts test/wiring.test.ts test/mailer.test.ts",
     "test:e2e": "node --test test/relay-e2e.test.ts"
   },
   "dependencies": {

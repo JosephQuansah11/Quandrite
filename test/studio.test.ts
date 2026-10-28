@@ -580,15 +580,24 @@ test('a room splits into breakout rooms and spreads the participants', () => {
   assert.equal(studio.breakoutRoomStore.size, 3, 'every breakout is a room of its own');
   assert.equal(created.breakouts.rooms.every((room) => room.open === false), true);
   assert.equal(studio.getMember('a').breakoutId, null, 'the host stays in the main room');
-  assert.equal(studio.getMember('b').breakoutId, 'room-1-b1');
-  assert.equal(studio.getMember('c').breakoutId, 'room-1-b2');
-  assert.equal(studio.getMember('d').breakoutId, 'room-1-b3');
+  // The spread is a *suggestion*: nobody is taken anywhere by it, which is what leaves
+  // the choice with the participant.
+  assert.equal(studio.getMember('b').breakoutId, null, 'a suggestion is not a move');
+  assert.equal(studio.getMember('b').suggestedBreakoutId, 'room-1-b1');
+  assert.equal(studio.getMember('c').suggestedBreakoutId, 'room-1-b2');
+  assert.equal(studio.getMember('d').suggestedBreakoutId, 'room-1-b3');
   assert.deepEqual(created.breakouts.rooms.map((room) => room.memberCount), [1, 1, 1]);
   assert.equal(studio.createBreakouts({ count: 2 }).ok, false, 'breakouts are created once');
 
+  // Walking in is the participant's own move.
+  studio.setBreakoutsOpen(true);
+  const chosen = studio.assignBreakout('b', 'room-1-b2');
+  assert.equal(chosen.ok, true);
+  assert.equal(studio.getMember('b').breakoutId, 'room-1-b2', 'they picked a different room');
+
   const snapshot = studio.snapshot();
   assert.equal(snapshot.breakouts.rooms.length, 3);
-  assert.equal(snapshot.members.find((member) => member.id === 'b').breakoutId, 'room-1-b1');
+  assert.equal(snapshot.members.find((member) => member.id === 'b').breakoutId, 'room-1-b2');
 });
 
 test('the host moves people between rooms and the assignments stick', () => {
@@ -627,14 +636,16 @@ test('opening and closing breakout rooms keeps the groups for next time', () => 
 
   const closed = studio.setBreakoutsOpen(false);
   assert.equal(closed.breakouts.rooms.every((room) => !room.open), true);
-  assert.equal(studio.getMember('b').breakoutId, 'room-1-b1', 'the assignment survives the close');
+  assert.equal(studio.getMember('b').breakoutId, null, 'nobody was in a room to begin with');
+  assert.equal(studio.getMember('b').suggestedBreakoutId, 'room-1-b1', 'the suggestion survives the close');
   assert.equal(studio.setBreakoutsOpen(true, { breakoutId: 'nope' }).ok, false);
 
   const shuffled = studio.autoAssignBreakouts();
   assert.equal(shuffled.ok, true);
   assert.equal(shuffled.breakouts.rooms.reduce((total, room) => total + room.memberCount, 0), 1);
   assert.equal(studio.autoAssignBreakouts({ b: 'room-1-b2' }).ok, true);
-  assert.equal(studio.getMember('b').breakoutId, 'room-1-b2');
+  assert.equal(studio.getMember('b').suggestedBreakoutId, 'room-1-b2');
+  assert.equal(studio.getMember('b').breakoutId, null, 'and a reshuffle still moves nobody');
 });
 
 test('breakout rooms are removed with their parent room', async () => {
@@ -664,11 +675,17 @@ test('a timed breakout session closes itself', async () => {
   assert.equal(live.active, true);
   assert.ok(live.endsAt > Date.now());
 
+  // Bob walks into his room, and the timer is what takes him back out of it.
+  studio.assignBreakout('b', 'room-1-b1');
+  assert.equal(studio.getMember('b').breakoutId, 'room-1-b1');
+
   await sleep(1200);
   const done = studio.breakoutsSnapshot();
   assert.equal(done.active, false, 'the timer cleared the session');
   assert.equal(done.rooms.every((room) => !room.open), true);
-  assert.equal(studio.getMember('b').breakoutId, 'room-1-b1');
+  // The choice is kept, the way a group is kept for next time; moving the *session* home
+  // is the signalling layer's job (see the breakout tests there).
+  assert.equal(studio.getMember('b').breakoutId, 'room-1-b1', 'and the group is kept for next time');
 });
 
 test('a breakout room cannot be split again or created without a registry', () => {

@@ -48,6 +48,21 @@ function cleanText(value, max) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+/** How a room recognises a name again: case and stray spacing do not matter. */
+function nameKey(name) {
+  return String(name ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * The key for a private conversation.
+ *
+ * The two member ids in a fixed order, so both sides of the thread find the same list
+ * however the pair is spelled. The separator cannot appear in a client id.
+ */
+function privateThreadKey(a, b) {
+  return [String(a), String(b)].sort().join('\u0000');
+}
+
 /** Trim and bound a room password; empty becomes null (not configured). */
 function cleanSecret(value) {
   const secret = String(value ?? '').slice(0, MAX_PASSWORD_LENGTH);
@@ -84,6 +99,13 @@ export class Studio extends EventEmitter {
   createdAt: number;
   members: Map<string, Member>;
   chat: ChatMessage[];
+  /**
+   * Names (lower-cased) the host has muted one at a time. A sweep is not remembered, a
+   * decision about a person is - see `rememberMute`.
+   */
+  mutedNames: Set<string>;
+  /** Private conversations, keyed by `privateThreadKey`. */
+  privateChats: Map<string, ChatMessage[]>;
   sources: Map<string, Source>;
   destinations: Map<string, any>;
   program: Program;
@@ -130,7 +152,17 @@ export class Studio extends EventEmitter {
     this.createdAt = Date.now();
 
     this.members = new Map();
+    // Names the host has muted one by one: a decision about a person, which is meant to
+    // hold if they close the tab and come back. "Mute all" is a sweep, not a policy, so
+    // it is not remembered here.
+    this.mutedNames = new Set();
     this.chat = [];
+    /**
+     * Private conversations, keyed by the pair of members in them. They are never part of
+     * the room's chat: a private message reaches two people, and the room's history is
+     * for everyone.
+     */
+    this.privateChats = new Map();
     this.sources = new Map();
     this.destinations = new Map();
 
@@ -256,12 +288,16 @@ export class Studio extends EventEmitter {
       name: memberName,
       role: effectiveRole,
       joinedAt: Date.now(),
-      muted: false,
+      // Somebody the host muted individually arrives muted: the decision is about them,
+      // not about the moment they were in the room.
+      muted: this.mutedNames.has(nameKey(memberName)),
       cameraEnabled: false,
       screenSharing: false,
       speaking: false,
       sourceIds: [],
       breakoutId: null,
+      // Where the host's spread *suggests* they go: shown in the picker, moves nobody.
+      suggestedBreakoutId: null,
     };
     this.members.set(clientId, member);
     if (effectiveRole === 'host') {
@@ -343,6 +379,26 @@ export class Studio extends EventEmitter {
     if (patch.name !== undefined) member.name = cleanText(patch.name, MAX_MEMBER_NAME) || member.name;
     this.emit('members', this.membersSnapshot());
     return member;
+  }
+
+  /**
+   * Remember - or forget - a host's mute of one person.
+   *
+   * Muting somebody is a decision about them, and it should not be undone by a reload:
+   * the name goes on a list, and the next person to join under that name arrives muted.
+   * Nobody is locked out of their own microphone - anyone can unmute themselves at any
+   * time, and the host unmuting them clears the note. The list is by name, which is what
+   * a room has to identify somebody by; a person who changes their name arrives
+   * unmuted, which is a fair price for not holding onto identities.
+   */
+  rememberMute(clientId, muted) {
+    const member = this.members.get(clientId);
+    if (!member) return false;
+    const key = nameKey(member.name);
+    if (!key) return false;
+    if (muted) this.mutedNames.add(key);
+    else this.mutedNames.delete(key);
+    return true;
   }
 
   /**
@@ -546,6 +602,14 @@ export class Studio extends EventEmitter {
   }
 
   /** Spread the participants across the breakout rooms (host stays home). */
+  /**
+   * Suggest where each member could go.
+   *
+   * A suggestion, not a move: `suggestedBreakoutId` is what the picker shows as "your
+   * room", and nobody is taken anywhere by it. Opening the rooms tells everybody they can
+   * choose; a host who wants somebody in a particular room moves them from the roster
+   * (`assignBreakout`), which *is* a move.
+   */
   autoAssignBreakouts(assignments = null) {
     const ids = [...this.breakouts.keys()];
     if (!ids.length) return { ok: false, error: 'there are no breakout rooms yet' };
@@ -554,17 +618,26 @@ export class Studio extends EventEmitter {
     let cursor = 0;
     for (const member of [...this.members.values()].sort((a, b) => a.joinedAt - b.joinedAt)) {
       if (member.id === this.hostId && !explicit.has(member.id)) {
-        this._placeMember(member, null);
+        this._suggestBreakout(member, null);
         continue;
       }
       const target = explicit.has(member.id) ? explicit.get(member.id) : ids[cursor % ids.length];
       cursor += 1;
-      this._placeMember(member, target);
+      this._suggestBreakout(member, target);
     }
 
     this.emit('members', this.membersSnapshot());
     this.emit('breakouts', this.breakoutsSnapshot());
     return { ok: true, breakouts: this.breakoutsSnapshot() };
+  }
+
+  /** Record where a member *could* go, without moving them. */
+  _suggestBreakout(member, breakoutId) {
+    const target = breakoutId ? this.breakouts.get(breakoutId) : null;
+    member.suggestedBreakoutId = target ? target.id : null;
+    if (!target) return member;
+    if (!target.memberIds.includes(member.id)) target.memberIds.push(member.id);
+    return member;
   }
 
   /** Send one member to a breakout room, or back to the main room (`null`). */
@@ -591,6 +664,36 @@ export class Studio extends EventEmitter {
     member.breakoutId = target ? target.id : null;
     if (target && !target.memberIds.includes(member.id)) target.memberIds.push(member.id);
     return member;
+  }
+
+  /**
+   * Rename a breakout room.
+   *
+   * Rooms start as "Breakout 1", "Breakout 2" - the least a host has to decide to get
+   * going - but the point of a name is that the people *choosing* where to go can see
+   * where they are going, so the host can call them what the session is actually about.
+   * The breakout room's own name follows, so somebody inside it sees the new one too.
+   */
+  renameBreakout(breakoutId, label) {
+    const breakout = this.breakouts.get(breakoutId);
+    if (!breakout) return { ok: false, error: 'breakout room not found' };
+    const next = cleanText(label, MAX_BREAKOUT_LABEL);
+    if (!next) return { ok: false, error: 'a breakout room needs a name' };
+    if (next === breakout.label) return { ok: true, breakouts: this.breakoutsSnapshot() };
+
+    const before = breakout.label;
+    breakout.label = next;
+    const room = this.breakoutRooms?.rename?.(breakoutId, `${this.name} - ${next}`);
+    if (room === false) return { ok: false, error: 'the breakout room could not be renamed' };
+
+    this.addChat({
+      authorId: 'system',
+      authorName: 'Quandrite',
+      kind: 'system',
+      text: `"${before}" is now called "${next}"`,
+    });
+    this.emit('breakouts', this.breakoutsSnapshot());
+    return { ok: true, breakouts: this.breakoutsSnapshot() };
   }
 
   /**
@@ -696,9 +799,21 @@ export class Studio extends EventEmitter {
     this.breakoutSession = null;
   }
 
-  addChat({ authorId, authorName, text, kind = 'text' }: any = {}) {
-    const body = kind === 'system' ? cleanText(text, MAX_CHAT_LENGTH) : String(text ?? '').trim().slice(0, MAX_CHAT_LENGTH);
-    if (!body) return null;
+  /**
+   * Post a chat message.
+   *
+   * Three kinds of message share one shape: the room's own conversation, a **private**
+   * one (with `to`), and a system notice. A private message is kept in a thread keyed by
+   * the pair, never in the room's chat, and the emitted event carries `to` so the
+   * signalling layer can deliver it to those two people and nobody else. A message may
+   * carry a picture, in which case it may have no words at all.
+   */
+  addChat({ authorId, authorName, text, kind = 'text', to = null, attachment = null }: any = {}) {
+    const body =
+      kind === 'system'
+        ? cleanText(text, MAX_CHAT_LENGTH)
+        : String(text ?? '').trim().slice(0, MAX_CHAT_LENGTH);
+    if (!body && !attachment) return null;
     const message = {
       id: randomUUID(),
       authorId: authorId || 'system',
@@ -706,12 +821,41 @@ export class Studio extends EventEmitter {
       kind,
       text: body,
       at: Date.now(),
+      to: to || null,
+      attachment: attachment || null,
     };
-    this.chat.push(message);
-    const limit = this.config?.chatLimit ?? 500;
-    if (this.chat.length > limit) this.chat.splice(0, this.chat.length - limit);
+
+    if (message.to) {
+      const key = privateThreadKey(authorId, message.to);
+      const thread = this.privateChats.get(key) || [];
+      thread.push(message);
+      const limit = this.config?.chatLimit ?? 500;
+      if (thread.length > limit) thread.splice(0, thread.length - limit);
+      this.privateChats.set(key, thread);
+    } else {
+      this.chat.push(message);
+      const limit = this.config?.chatLimit ?? 500;
+      if (this.chat.length > limit) this.chat.splice(0, this.chat.length - limit);
+    }
     this.emit('chat', message);
     return message;
+  }
+
+  /**
+   * The private threads a member is part of, keyed by the other person.
+   *
+   * A reload should not lose a conversation, so the threads come with the join. Only the
+   * two people in a thread ever see it.
+   */
+  privateThreadsFor(clientId) {
+    const threads: any = {};
+    for (const [key, messages] of this.privateChats) {
+      const pair = key.split('\u0000');
+      if (!pair.includes(clientId)) continue;
+      const peer = pair[0] === clientId ? pair[1] : pair[0];
+      threads[peer] = messages.slice(-100);
+    }
+    return threads;
   }
 
   // ---------------------------------------------------------------- sources

@@ -55,6 +55,13 @@ export class RoomRegistry {
       breakoutRooms: {
         create: (options) => this.createBreakout(options),
         remove: (roomId) => this.delete(roomId),
+        // A renamed breakout room keeps its own name in step with the parent's list.
+        rename: (roomId, name) => {
+          const room = this.rooms.get(String(roomId || '').trim().toLowerCase());
+          if (!room) return false;
+          room.name = name;
+          return true;
+        },
       },
       config: this.config,
       recordingStore: this.recordingStore,

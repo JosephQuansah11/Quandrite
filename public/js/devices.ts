@@ -9,6 +9,7 @@
  */
 
 import { CLIENT } from '/shared/protocol.js';
+import { microphoneConstraints, screenAudioConstraints } from '/shared/audio.js';
 
 let sourceCounter = 0;
 
@@ -152,7 +153,9 @@ export class CameraManager extends EventTarget {
     if (deviceId) baseVideo.deviceId = { exact: deviceId };
     const constraints = {
       video: baseVideo,
-      audio: withAudio ? { echoCancellation: true } : false,
+      // A microphone is speech: the three processors help, and one channel is all it has.
+      // 48 kHz keeps the whole path at one rate instead of quietly resampling.
+      audio: withAudio ? microphoneConstraints() : false,
     };
 
     let stream;
@@ -176,6 +179,9 @@ export class CameraManager extends EventTarget {
     }
 
     const track = stream.getVideoTracks()[0];
+    // Say what the pixels are for: the encoder keeps a camera smooth and a shared
+    // screen sharp, and the same hint travels with the track over WebRTC.
+    if (track && 'contentHint' in track) track.contentHint = 'motion';
     const settings = track?.getSettings?.() || {};
     const resolvedDeviceId = settings.deviceId || deviceId || null;
     const id = deviceId ? `camera:${deviceId}` : nextSourceId('camera');
@@ -230,7 +236,10 @@ export class CameraManager extends EventTarget {
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: { ideal: 30 } },
-        audio,
+        // A shared screen's sound may be music, and every one of the microphone's
+        // processors would damage it: no echo cancellation, no noise suppression, no
+        // automatic gain, and stereo kept.
+        audio: audio ? screenAudioConstraints() : false,
       });
     } catch (error) {
       if (error?.name !== 'NotAllowedError') {
@@ -240,6 +249,9 @@ export class CameraManager extends EventTarget {
     }
 
     const track = stream.getVideoTracks()[0];
+    // Say what the pixels are for: the encoder keeps a camera smooth and a shared
+    // screen sharp, and the same hint travels with the track over WebRTC.
+    if (track && 'contentHint' in track) track.contentHint = 'detail';
     const settings = track?.getSettings?.() || {};
     const id = nextSourceId('screen');
 
@@ -268,7 +280,7 @@ export class CameraManager extends EventTarget {
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: deviceId ? { deviceId: { exact: deviceId } } : { echoCancellation: true },
+        audio: microphoneConstraints(deviceId),
         video: false,
       });
     } catch (error) {
@@ -298,6 +310,10 @@ export class CameraManager extends EventTarget {
       }
     }
     if (source.video) source.video.srcObject = null;
+    // Relayed pictures hold decoded frames: let them go with the source.
+    for (const frame of [source.frame, source.lastFrame]) frame?.close?.();
+    source.frame = null;
+    source.lastFrame = null;
     if (source.announced) {
       try {
         await this.socket.send(CLIENT.SOURCE_REMOVE, { sourceId: id });
@@ -340,10 +356,16 @@ export class CameraManager extends EventTarget {
   /**
    * A peer's picture that arrived over the socket instead of peer to peer.
    *
-   * It is kept as an `<img>`, which the compositor draws exactly like a video, so
-   * a relayed camera or screen can be shown in the room and put on the program.
+   * Two things are kept, because they are used differently: the `<img>` for the
+   * room tile, and - when the browser can decode it - an `ImageBitmap` for the
+   * compositor. A decoded bitmap is always drawable; an `<img>` whose `src` has
+   * just changed has no picture at all until it loads, which is what used to make
+   * the program flash dark on every relayed frame.
+   *
+   * The previous frame is kept too, so a refresh can never leave the program with
+   * nothing to draw: there is always at least one fully decoded frame to show.
    */
-  attachRemoteImage({ id, label = null, peerId = null, url, kind = 'virtual' }) {
+  attachRemoteImage({ id, label = null, peerId = null, url, kind = 'virtual', bitmap = null }) {
     if (!id || !url) return null;
     let source = this.sources.get(id);
     if (!source) {
@@ -366,6 +388,13 @@ export class CameraManager extends EventTarget {
       this.sources.set(id, source);
     }
     if (source.video?.tagName === 'IMG') source.video.src = url;
+    if (bitmap) {
+      // Exactly two frames are held - the newest and the one before it - and
+      // anything older is closed, so a long call cannot leak bitmaps.
+      if (source.lastFrame && source.lastFrame !== bitmap) source.lastFrame.close?.();
+      source.lastFrame = source.frame || null;
+      source.frame = bitmap;
+    }
     this._emit('change', this.list());
     return source;
   }

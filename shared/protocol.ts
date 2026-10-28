@@ -13,6 +13,8 @@ export const CLIENT = Object.freeze({
   JOIN: 'join',
   LEAVE: 'leave',
   PING: 'ping',
+  /** NTP-style exchange so the client can offset its clock to the server's. */
+  TIME_SYNC: 'time:sync',
   CHAT_SEND: 'chat:send',
   MEMBER_UPDATE: 'member:update',
   MEMBER_ROLE: 'member:role',
@@ -20,6 +22,7 @@ export const CLIENT = Object.freeze({
   ROOM_UPDATE: 'room:update',
   BREAKOUT_CREATE: 'breakout:create',
   BREAKOUT_ASSIGN: 'breakout:assign',
+  BREAKOUT_RENAME: 'breakout:rename',
   BREAKOUT_SHUFFLE: 'breakout:shuffle',
   BREAKOUT_OPEN: 'breakout:open',
   BREAKOUT_CLOSE: 'breakout:close',
@@ -47,12 +50,25 @@ export const SERVER = Object.freeze({
   ACK: 'ack',
   ERROR: 'error',
   PONG: 'pong',
+  TIME_SYNC: 'time:sync',
   CHAT_NEW: 'chat:new',
   CHAT_HISTORY: 'chat:history',
   MEMBERS_UPDATE: 'members:update',
   MEMBER_MEDIA: 'member:media',
   BREAKOUTS_UPDATE: 'breakouts:update',
   BREAKOUT_UPDATE: 'breakout:update',
+  /**
+   * The breakout room's **own** primary screen.
+   *
+   * A breakout is a room of its own, so it has its own sources and its own program: a
+   * screen shared inside one is shown to that room and nowhere else. The parent's
+   * program is a separate thing - it is the broadcast - and it still travels to everyone
+   * as `sources:update` / `program:update` / `scene:update`, because a host inside a
+   * breakout still runs the show.
+   */
+  BREAKOUT_SOURCES: 'breakout:sources',
+  BREAKOUT_PROGRAM: 'breakout:program',
+  BREAKOUT_SCENE: 'breakout:scene',
   SOURCES_UPDATE: 'sources:update',
   PROGRAM_UPDATE: 'program:update',
   SCENE_UPDATE: 'scene:update',
@@ -206,6 +222,142 @@ export function pushPayload(message) {
   return message.payload === undefined ? message : message.payload;
 }
 
+// ----------------------------------------------------------------- nanosecond
+
+/**
+ * Nanosecond timing for the media relay.
+ *
+ * Milliseconds are far too coarse to say anything useful about a relayed picture:
+ * a hop that is fine is a fraction of a millisecond, and the difference between a
+ * frame that is 3 ms old and one that is 9 ms old is invisible at `Date.now()`
+ * resolution. So relayed pictures and voice slices are stamped in nanoseconds.
+ *
+ * A stamp is only worth something if two devices agree on what it means, and their
+ * wall clocks do not (they can differ by seconds, and drift). So there is one
+ * time base - the server's monotonic clock - and every client keeps an offset to
+ * it (see `clockOffsetNs`, which is the usual round-trip estimate). A sender
+ * converts its own reading into server time before stamping a frame, so stamps
+ * from every device are directly comparable, and a receiver measures the lag
+ * against its own estimate of that same clock.
+ *
+ * That gives two honest numbers per frame: how long it took to reach the server
+ * (`srv - tns`) and how long it took to come back out (`now - srv`).
+ */
+export const NS_PER_MS = 1_000_000n;
+export const NS_PER_SECOND = 1_000_000_000n;
+
+/**
+ * A monotonic nanosecond reading on this machine.
+ *
+ * The server has a real nanosecond clock (`process.hrtime.bigint()`); browsers
+ * expose microseconds (`performance.now()`) at best, so a browser reading is
+ * exact arithmetic on a microsecond-accurate clock. Both are monotonic, which is
+ * what matters: neither can jump backwards mid-call the way a wall clock can.
+ */
+export function monotonicNs() {
+  if (typeof process !== 'undefined' && typeof process.hrtime?.bigint === 'function') {
+    return process.hrtime.bigint();
+  }
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    // performance.now() is milliseconds as a float; scaling by 1e6 stays exact for
+    // the first ~104 days of page life, which is plenty.
+    return BigInt(Math.round(performance.now() * 1e6));
+  }
+  return BigInt(Date.now()) * NS_PER_MS;
+}
+
+/** A nanosecond reading as a decimal string, for the wire (JSON has no bigint). */
+export function nsToWire(value: bigint) {
+  return value.toString();
+}
+
+/** Read a wire stamp back, tolerating the millisecond numbers older clients send. */
+export function nsFromWire(value: any): bigint | null {
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'string' && /^-?\d+$/.test(value)) {
+    try {
+      return BigInt(value);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return BigInt(Math.round(value));
+  return null;
+}
+
+/**
+ * Offset between my clock and the server's, from one exchange.
+ *
+ * The client stamps the request `t0`, the server stamps its reply `t1` on receipt
+ * and `t2` on send, and the client stamps `t3` on arrival. Assuming the two legs
+ * took the same time, the offset is the average of the two differences, and the
+ * round trip is the error bound. Taken over several samples the lowest round trip
+ * wins, because a queue somewhere in the middle can only add delay.
+ */
+export function clockOffsetNs({ t0, t1, t2, t3 }: any) {
+  const sent = nsFromWire(t0);
+  const got = nsFromWire(t1);
+  const replied = nsFromWire(t2);
+  const back = nsFromWire(t3);
+  if (sent === null || got === null || replied === null || back === null) return null;
+  const roundTripNs = back - sent;
+  if (roundTripNs < 0n) return null;
+  return { offsetNs: (got - sent + (replied - back)) / 2n, roundTripNs };
+}
+
+/** True when a frame is older than `limitNs` on the shared clock. */
+export function isStaleNs(capturedNs: bigint | null, nowNs: bigint, limitNs: bigint) {
+  if (capturedNs === null) return false;
+  return nowNs - capturedNs > limitNs;
+}
+
+/**
+ * Break a relayed frame's stamps into the two hops, in nanoseconds.
+ *
+ * `totalNs` is what the room feels - how old the picture is by the time it is
+ * shown. `inboundNs` is the sender-to-server leg and `outboundNs` is the
+ * server-to-me leg, which is what makes it possible to say *which* side of the
+ * network is at fault: a lag of 400 ms that is 380 ms inbound is the sender's
+ * uplink, while the same total mostly outbound is my own downlink.
+ *
+ * A null means the stamp was missing (an older sender), so nothing is known about
+ * that hop rather than it being guessed at.
+ */
+export function relayLagNs(header: any, nowNs: bigint) {
+  const capturedNs = nsFromWire(header?.tns);
+  const srvNs = nsFromWire(header?.srv);
+  return {
+    capturedNs,
+    srvNs,
+    totalNs: capturedNs === null ? null : nowNs - capturedNs,
+    inboundNs: capturedNs === null || srvNs === null ? null : srvNs - capturedNs,
+    outboundNs: srvNs === null ? null : nowNs - srvNs,
+  };
+}
+
+/**
+ * A lag, written the way it reads best: nanoseconds when a hop is that short,
+ * microseconds under a millisecond, milliseconds beyond that.
+ */
+export function formatLagNs(value: bigint | number | null | undefined) {
+  if (value === null || value === undefined) return '';
+  const ns = typeof value === 'bigint' ? value : BigInt(Math.round(value));
+  const negative = ns < 0n;
+  const size = negative ? -ns : ns;
+  const sign = negative ? '-' : '';
+  if (size < 1_000n) return `${sign}${size} ns`;
+  if (size < NS_PER_MS) return `${sign}${(Number(size) / 1e3).toFixed(2)} \u00b5s`;
+  if (size < NS_PER_SECOND) return `${sign}${(Number(size) / 1e6).toFixed(2)} ms`;
+  return `${sign}${(Number(size) / 1e9).toFixed(2)} s`;
+}
+
+/** Lossy milliseconds, for display or for timers that want a number. */
+export function nsToMs(value: bigint | number | null | undefined) {
+  if (value === null || value === undefined) return 0;
+  const ns = typeof value === 'bigint' ? value : BigInt(Math.round(value));
+  return Number(ns / 1_000n) / 1000;
+}
+
 // --------------------------------------------------------------- media relay
 
 /**
@@ -216,6 +368,38 @@ export function pushPayload(message) {
 export const RELAY_MAGIC = 'QMR1';
 /** How many relayed pictures a second the server passes on, per sender. */
 export const RELAY_MAX_FPS = 8;
+/**
+ * Voice needs a much steadier stream than pictures do: 20 ms of PCM is 50 frames
+ * a second, and throttling it to the picture rate would chop the sound up.
+ */
+export const RELAY_AUDIO_MAX_FPS = 60;
+/**
+ * ...and voice may arrive in a small burst: browsers do not fire their audio
+ * callbacks exactly on time, and dropping a slice is a click in someone's ear.
+ */
+export const RELAY_AUDIO_BURST = 6;
+/**
+ * The PCM fallback: mono, 16-bit, 16 kHz - 32 KB/s, and easy to decode anywhere.
+ *
+ * The relay prefers **Opus at 48 kHz** through WebCodecs (see `shared/audio.ts`); this
+ * is what a browser without it still sends, and what the receiver falls back to when a
+ * frame arrives without a codec.
+ */
+export const RELAY_AUDIO_RATE = 16000;
+/** A picture older than this is worthless: showing it only adds its own delay. */
+export const RELAY_STALE_NS = 1_500_000_000n;
+/** Voice is stricter still - half a second late is not a conversation. */
+export const RELAY_AUDIO_STALE_NS = 600_000_000n;
+/** How often a client re-measures its offset to the server clock. */
+export const CLOCK_SYNC_INTERVAL_MS = 30_000;
+/**
+ * A newcomer should see the room straight away, so the server keeps the last
+ * picture from each source and hands it over on join. These are stills rather
+ * than live frames - the room's own staleness rule would drop them - so they are
+ * marked `warm` and the receiver shows them until the live ones arrive.
+ */
+export const RELAY_WARM_FRAMES = 6;
+export const RELAY_WARM_MAX_AGE_MS = 12_000;
 
 const relayText = new TextEncoder();
 const relayReader = new TextDecoder();
@@ -284,6 +468,11 @@ export interface Member {
   sourceIds: string[];
   /** The breakout room the member is assigned to, `null` for the main room. */
   breakoutId: string | null;
+  /**
+   * Where the host's spread suggests this member could go. It is shown in the picker and
+   * moves nobody: a participant walks into a room themselves.
+   */
+  suggestedBreakoutId?: string | null;
 }
 
 export interface Source {
@@ -338,7 +527,33 @@ export interface ChatMessage {
   kind: 'text' | 'system';
   text: string;
   at: number;
+  /** Set for a private message: the member it was sent to, and nobody else sees it. */
+  to?: string | null;
+  /** Set when the message carries a picture. */
+  attachment?: ChatAttachment | null;
 }
+
+/**
+ * A picture in a chat message.
+ *
+ * The picture itself is uploaded first and referred to by URL: a chat message travels
+ * over the signalling socket, and a megabyte of base64 in every message would slow the
+ * room down for everyone. The server hands back the URL, and only ever accepts URLs it
+ * produced itself.
+ */
+export interface ChatAttachment {
+  url: string;
+  name: string;
+  mime: string;
+  bytes: number;
+  width: number;
+  height: number;
+}
+
+/** Pictures a chat message may carry, and how big they may be once decoded. */
+export const CHAT_ATTACHMENT_TYPES = Object.freeze(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+export const MAX_CHAT_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 
 export interface SceneSnapshot {
   id: string;
@@ -418,4 +633,6 @@ export interface StudioCredentials {
 export interface BreakoutRoomAdapter {
   create(options: { id: string; name: string; parentId: string; index: number }): any;
   remove(roomId: string): Promise<unknown> | unknown;
+  /** Rename the breakout room itself, so a member inside it sees the new name too. */
+  rename?(roomId: string, name: string): boolean;
 }

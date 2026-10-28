@@ -1,3 +1,271 @@
+/* ============================================================ the room itself */
+/* People first. The room is a grid of faces filling the window with the controls
+   along the bottom; the studio panes are one toggle away, not always in the way. */
+.room {
+  display: none;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 0;
+  height: calc(100vh - 108px);
+  padding: 0 12px 10px;
+}
+.room:not(.hidden) { display: grid; }
+
+.room-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 4px 0;
+}
+.room-heading { display: grid; line-height: 1.15; }
+.room-heading strong { font-size: 14px; }
+.room-heading small { color: var(--muted); font-size: 11.5px; }
+.room-bar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.room-stage {
+  position: relative;
+  min-height: 0;
+  display: grid;
+  padding: 4px 0;
+}
+/* The main view holds the program and the people. Which of them is shown - and
+   whether both are - is the view switcher's business, and it all happens in this
+   one container. */
+.room-stage .stage-view { min-height: 0; min-width: 0; }
+.room-stage.view-people .program-view { display: none; }
+.room-stage.view-program .people-view { display: none; }
+.room-stage.view-split {
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+}
+.room-stage.view-split .program-view,
+.room-stage.view-split .people-view { display: grid; align-content: center; }
+.room-stage.view-program .program-view,
+.room-stage.view-people .people-view { display: grid; align-content: center; }
+
+/* The program frame is the shape of the picture, and never taller than its slot. */
+.program-view { min-height: 0; }
+.program-view .program-frame { max-height: 100%; width: 100%; margin: 0 auto; }
+
+/* The studio floats over the room: the room keeps its own space underneath, and the
+   popup fills the container it belongs to. */
+
+/* The grid of people: one column count, chosen to fill the space, and every tile the
+   same size - a grid of participants should look like a grid. */
+.room-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(var(--room-columns, 3), minmax(0, 1fr));
+  grid-auto-rows: 1fr;
+  align-content: center;
+  justify-content: center;
+  max-height: 100%;
+  overflow: auto;
+}
+/* Whoever is on air says so on their own tile. */
+.room-tile .badge-air {
+  position: absolute; top: 8px; left: 8px;
+  padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700;
+  letter-spacing: .02em; text-transform: lowercase;
+  background: rgba(220, 38, 38, .92); color: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .45);
+}
+.room-tile {
+  position: relative;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0b1223;
+  aspect-ratio: 16 / 9;
+  min-height: 0;
+}
+.room-tile video,
+.room-tile img.tile-picture {
+  width: 100%; height: 100%; object-fit: cover; display: block; background: #05080f;
+}
+.room-tile .avatar {
+  display: grid; place-items: center; width: 100%; height: 100%;
+  font-weight: 800; font-size: clamp(18px, 2.4vw, 30px); color: #bae6fd;
+  background: linear-gradient(135deg, rgba(56, 189, 248, .16), rgba(168, 85, 247, .16));
+}
+.room-tile.live .avatar { display: none; }
+/* The name sits on the picture, the way every call app does it. */
+.room-tile .name {
+  position: absolute; left: 8px; bottom: 8px; right: 8px;
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: #eaf2ff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .8);
+}
+.room-tile .name .pill-badge {
+  padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600;
+  background: rgba(6, 10, 22, .72); color: #cbd5e1;
+}
+.room-tile .wave { position: absolute; left: 8px; right: 8px; bottom: 26px; }
+/* A host's controls on a participant's tile: mute them, stop their video, right where
+   they are. They stay out of the way until the tile is pointed at. */
+.room-tile .tile-tools {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  display: flex; gap: 4px; opacity: 0; transition: opacity .14s ease;
+}
+.room-tile:hover .tile-tools,
+.room-tile:focus-within .tile-tools { opacity: 1; }
+.room-tile .tile-tools .tiny {
+  padding: 4px 6px; border-radius: 8px;
+  background: rgba(6, 10, 22, .78); backdrop-filter: blur(4px);
+}
+/* On a touch screen there is no hover, so the controls are simply always there. */
+@media (hover: none) {
+  .room-tile .tile-tools { opacity: 1; }
+}
+/* Whoever is talking is outlined, so a grid of many faces still reads. */
+.room-tile.speaking { border-color: var(--ok); box-shadow: 0 0 0 1px rgba(34, 197, 94, .5); }
+.room-tile.pinned { border-color: var(--accent); }
+.room-tile .badge-share {
+  position: absolute; top: 8px; left: 8px;
+  padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600;
+  background: rgba(37, 99, 235, .92); color: #fff;
+}
+/* The program bar: the host's controls, above the picture they control. */
+.program-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 0 2px 8px;
+}
+.program-bar .program-meta { margin-left: auto; }
+.program-bar[hidden] { display: none; }
+
+/* What is being presented takes a bigger tile than the faces around it. */
+.room-empty { margin: 0; text-align: center; }
+
+/* My own picture, floating like a call app's self view - and it goes where I put it. */
+.self-view {
+  position: absolute; right: 10px; bottom: 10px; width: clamp(120px, 16vw, 220px);
+  aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--line); background: #05080f; z-index: 3;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  /* A drag must move the picture, never scroll the page under it. */
+  cursor: grab; touch-action: none; user-select: none;
+}
+.self-view.dragging { cursor: grabbing; }
+.self-view:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.self-view[hidden] { display: none; }
+.self-view video { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* My own picture is a mirror: I see myself the way I am used to seeing myself, and
+   moving right moves the picture right. What the room and the platforms receive is
+   never mirrored - that would reverse any text in the picture for everybody else.
+   Click the self view to flip it back if you would rather see it as they do, or drag it
+   to put it wherever on the screen suits you. */
+.self-view video { transform: scaleX(-1); }
+.self-view.unmirrored video { transform: none; }
+.self-view-name {
+  position: absolute; left: 8px; bottom: 6px; font-size: 11px; font-weight: 600;
+  color: #eaf2ff; text-shadow: 0 1px 3px rgba(0, 0, 0, .8);
+}
+
+/* The bottom bar: the things you actually do during a meeting. */
+.room-toolbar {
+  justify-self: center;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 8px 12px; border-radius: 999px;
+  background: rgba(10, 16, 30, .92); border: 1px solid var(--line);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .45);
+}
+.room-tool {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+  background: #16233c; color: #e2e8f0; border: 1px solid transparent;
+}
+.room-tool:hover { background: #1d2c4a; }
+.room-tool[aria-pressed='true'] { background: #2a3a5e; border-color: var(--accent); color: #bae6fd; }
+.room-tool:disabled { opacity: .5; }
+.room-tool.danger { background: var(--danger); color: #fff; }
+.room-tool.danger:hover { background: #dc2626; }
+
+/* Which breakout room to join: one row per room, and where I am now. */
+.breakout-dialog {
+  width: min(460px, 94vw);
+  max-height: 86vh;
+  padding: 14px 16px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(14, 22, 42, .99), rgba(8, 13, 26, .99));
+  color: var(--text);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .6);
+}
+.breakout-dialog::backdrop { background: rgba(2, 6, 14, .62); backdrop-filter: blur(2px); }
+.breakout-picker { display: grid; gap: 8px; margin-bottom: 10px; }
+.breakout-choice {
+  display: grid; gap: 2px; text-align: left; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: #101a2e; color: var(--text); font: inherit;
+}
+.breakout-choice:hover:not(:disabled) { background: #16233c; border-color: var(--accent); }
+.breakout-choice.here { border-color: var(--ok); background: rgba(34, 197, 94, .12); }
+.breakout-choice.off { opacity: .55; cursor: not-allowed; }
+.breakout-choice-name { font-weight: 650; font-size: 13.5px; }
+.breakout-choice-detail { font-size: 11.5px; }
+.breakout-note { font-size: 11.5px; margin: 0; }
+/* The host's rename, in place in the list. */
+.breakout-rename {
+  width: 100%; padding: 3px 6px; border-radius: 6px; font: inherit; font-size: 12.5px;
+  background: #0a1120; color: var(--text); border: 1px solid var(--accent);
+}
+
+/* The studio: the panes as they were, as a popup over the room with its tabs as the
+   menu. It fills the container rather than replacing it - nothing here is a page. */
+.studio-panes {
+  position: absolute; inset: 8px; z-index: 30;
+  overflow: auto; padding: 14px; border-radius: 14px;
+  background: linear-gradient(180deg, rgba(12, 19, 36, .99), rgba(8, 13, 26, .99));
+  border: 1px solid var(--line);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
+  min-height: 0;
+}
+.studio-panes.hidden { display: none; }
+/* The room is where it floats over. */
+.room { position: relative; }
+
+/* The Share picker and Chat, in front of the room. */
+.share-dialog,
+.chat-dialog,
+.people-dialog {
+  width: min(560px, 94vw);
+  max-height: 86vh;
+  padding: 14px 16px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(14, 22, 42, .99), rgba(8, 13, 26, .99));
+  color: var(--text);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .6);
+}
+/* The roster is the one popup that is a list, so it gets more room and scrolls. */
+.people-dialog { width: min(620px, 94vw); }
+.people-dialog #people-dialog-body { max-height: 70vh; overflow: auto; }
+.share-dialog::backdrop, .chat-dialog::backdrop, .people-dialog::backdrop { background: rgba(2, 6, 14, .62); backdrop-filter: blur(2px); }
+.share-dialog-head, .chat-dialog-head, .people-dialog-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.share-dialog-head h2, .chat-dialog-head h2 { margin: 0; font-size: 15px; }
+.share-dialog-head button, .chat-dialog-head button { margin-left: auto; }
+.share-dialog .device-picker { max-height: 46vh; overflow: auto; }
+
+/* Feedback: said out loud, and undone when it stops. */
+.feedback-banner {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  z-index: 5; padding: 7px 12px; border-radius: 999px; font-size: 12px;
+  background: rgba(120, 53, 15, .94); border: 1px solid rgba(251, 191, 36, .55);
+  color: #fde68a;
+}
+.feedback-banner.hidden { display: none; }
+
+@media (max-width: 720px) {
+  .room { height: calc(100vh - 120px); padding: 0 8px 8px; }
+  .room-grid { grid-template-columns: repeat(auto-fit, minmax(46vw, 1fr)); gap: 8px; }
+  .room-tile.program { grid-column: span 2; grid-row: auto; }
+  .room-toolbar { width: 100%; justify-content: space-between; border-radius: 14px; }
+  .room-tool { padding: 9px 10px; }
+  .room-tool .room-tool-label { font-size: 12px; }
+  .self-view { width: 30vw; }
+  .studio-panes { inset: 52px 6px 6px; }
+}
+
+
 :root {
   --bg: #070b16;
   --bg-soft: #0d1424;
@@ -160,8 +428,8 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 }
 /* The program picture is the whole width, with the people in the room right
    under it; the studio tools and the tabbed sidebar sit below. */
-.layout > .program-panel,
-.layout > .participants-panel { grid-column: 1 / -1; }
+.layout > .participants-panel,
+.layout > .grid-panel { grid-column: 1 / -1; }
 @media (max-width: 1100px) {
   .layout { grid-template-columns: minmax(0, 1fr); }
 }
@@ -193,17 +461,24 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   overflow: hidden;
   background: #04070f;
   border: 1px solid var(--line);
-  /* The program picture is the point of the page: about 90% of the view. */
-  aspect-ratio: auto;
-  height: 90vh;
-  max-height: 90vh;
+  /* The frame is the shape of the *picture*, never a taller box around it: a share
+     used to sit inside a black container roughly the height of a phone screen. The
+     aspect ratio is set from the on-air video when one is published. */
+  aspect-ratio: var(--program-aspect, 16 / 9);
+  max-height: min(88vh, 100%);
+  width: 100%;
 }
 #program-canvas { width: 100%; height: 100%; display: block; object-fit: contain; }
-/* Nothing is mirrored: what the camera sees is what everyone else sees. */
+/* What goes *out* is never mirrored: the program picture, the room's tiles of other
+   people, and the grid preview are the real thing, and mirroring any of them would
+   reverse text in the picture for everyone else. Only my own preview is a mirror
+   (see the self view above). */
 .program-frame canvas,
 .program-feed,
 .participant-tile video,
 .participant-tile img,
+.room-tile video,
+.room-tile img,
 .source-tile video,
 .grid-preview-tile video { transform: none; }
 /* The program feed the room's owner sends: the real picture, laid over the
@@ -213,6 +488,24 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   object-fit: contain; background: #04070f; z-index: 1;
 }
 .badge.feed { background: rgba(37, 99, 235, .92); color: #fff; }
+/* The program's own controls sit out of the way until you want them. */
+.program-actions {
+  position: absolute; left: 12px; bottom: 12px; display: flex; gap: 6px; z-index: 3;
+  opacity: 0; transition: opacity .15s ease;
+}
+.program-frame:hover .program-actions,
+.program-actions:focus-within { opacity: 1; }
+.program-actions button { backdrop-filter: blur(6px); background: rgba(6, 10, 22, .72); color: #e2e8f0; }
+.program-actions button[aria-pressed='true'] { border-color: var(--accent); color: #bae6fd; }
+/* Something is covering the program: say so, and let the host drop it. */
+.program-blocked {
+  position: absolute; left: 12px; right: 12px; top: 12px; z-index: 4;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; border-radius: 9px;
+  background: rgba(120, 53, 15, .92); border: 1px solid rgba(251, 191, 36, .5);
+  color: #fde68a; font-size: 12px;
+}
+.program-blocked span { flex: 1 1 180px; }
 .program-overlay-badges { position: absolute; top: 10px; right: 12px; display: flex; gap: 8px; z-index: 2; }
 .badge {
   font-size: 11px; font-weight: 700; letter-spacing: .08em;
@@ -363,10 +656,42 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 
 .participant-tile .name { font-size: 12px; font-weight: 600; padding: 6px 8px 0; }
 .participant-tile .sub { font-size: 10.5px; color: var(--muted); padding: 0 8px 6px; }
+/* Which path the picture is on, and how far behind the relay is. */
+.participant-tile .transport { font-size: 10px; padding: 0 8px 6px; color: var(--muted); }
+.participant-tile .transport.p2p { color: var(--ok); font-weight: 600; }
+.participant-tile .transport.relay { color: var(--warn); }
 /* My own mic/camera controls, right on my tile. */
 .participant-tile .tile-actions { display: flex; gap: 4px; flex-wrap: wrap; padding: 0 8px 8px; }
 .participant-tile .tile-actions button { padding: 3px 6px; font-size: 10.5px; border-radius: 7px; }
 .participant-empty { margin: 0; font-size: 12px; }
+
+/* ------------------------------------------------------------ speaking wave */
+/* A wave under a tile says who is talking. It is one CSS animation per bar, and
+   the only thing the app does is toggle `.speaking` - so nothing runs per frame. */
+.wave {
+  display: flex; align-items: flex-end; justify-content: center; gap: 3px;
+  height: 12px; padding: 0 8px 6px; opacity: .25; transition: opacity .15s ease;
+}
+.wave i {
+  display: block; width: 3px; height: 4px; border-radius: 2px;
+  background: currentColor; color: var(--muted);
+  animation: wave 1s ease-in-out infinite;
+  animation-play-state: paused;
+}
+.wave i[data-bar='1'] { animation-delay: .12s; }
+.wave i[data-bar='2'] { animation-delay: .24s; }
+.wave i[data-bar='3'] { animation-delay: .36s; }
+.speaking .wave { opacity: 1; }
+.speaking .wave i { color: var(--ok); animation-play-state: running; }
+@keyframes wave {
+  0%, 100% { height: 4px; }
+  50% { height: 12px; }
+}
+/* The tile of whoever is talking gets a hint of a ring, the way a call app does. */
+.participant-tile.speaking, .remote-tile.speaking { border-color: var(--ok); }
+@media (prefers-reduced-motion: reduce) {
+  .wave i { animation: none; height: 8px; }
+}
 
 /* ---------------------------------------------------------- dialogs & panes */
 
@@ -503,11 +828,21 @@ button .icon { margin-right: 5px; }
 
 .pill.breakout { background: rgba(34, 197, 94, .16); border-color: var(--ok); color: #86efac; }
 
+/* Where I am in a breakout, over the stage so it is there in every view - and the way
+   out, right next to the thing that says where I am. */
 .breakout-banner {
-  display: flex; align-items: center; gap: 10px; justify-content: space-between;
-  border: 1px solid var(--ok); background: rgba(34, 197, 94, .12);
-  border-radius: 9px; padding: 8px 10px; margin-bottom: 10px; font-size: 12.5px;
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  z-index: 6; display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--ok); background: rgba(6, 24, 16, .94);
+  border-radius: 999px; padding: 7px 12px; font-size: 12.5px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
 }
+.breakout-banner.hidden { display: none; }
+/* The pill that says which room I am in is also the button that leaves it. */
+.pill.clickable { cursor: pointer; }
+.pill.clickable:hover { border-color: var(--accent); color: #bae6fd; }
+.pill:disabled { cursor: default; }
+.pill.breakout { border-color: var(--ok); color: #86efac; background: rgba(34, 197, 94, .12); }
 
 .role-badge.location { border-color: var(--line); color: var(--muted); }
 .role-badge.location.in-breakout {
@@ -527,6 +862,35 @@ label.inline input { width: 74px; }
 .chat-line.system { color: var(--muted); font-style: italic; }
 .chat-line .at { color: #5b6b8f; font-size: 10px; margin-left: 6px; }
 .chat-form { display: flex; gap: 8px; }
+/* Who the message goes to, and whether it is private. */
+.chat-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.chat-head .inline { font-size: 12px; }
+.chat-head #chat-target { min-width: 190px; }
+.chat-empty { font-size: 12.5px; }
+/* A picture in a message: never wider than the column, and it opens full size. */
+.chat-picture-link { display: block; margin-top: 4px; }
+.chat-picture {
+  display: block; max-width: 100%; max-height: 260px; width: auto;
+  border-radius: 8px; border: 1px solid var(--line); background: #05080f;
+}
+/* The picture waiting to be sent, with a way to change your mind. */
+.chat-pending {
+  display: flex; align-items: center; gap: 10px; margin: 8px 0 0;
+  padding: 8px; border: 1px solid var(--line); border-radius: 9px; background: #0a1120;
+}
+.chat-pending img { width: 72px; height: 48px; object-fit: cover; border-radius: 6px; }
+.chat-pending-meta { display: grid; gap: 2px; margin-right: auto; font-size: 12px; }
+.chat-pending-meta span { font-size: 11px; }
+.chat-pending.hidden { display: none; }
+/* The unread count on the Chat button. */
+.room-tool { position: relative; }
+.room-tool-badge {
+  position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px;
+  display: grid; place-items: center; padding: 0 5px; border-radius: 999px;
+  background: var(--danger); color: #fff; font-size: 11px; font-weight: 700;
+}
+.room-tool-badge.hidden { display: none; }
+.room-tool.on { background: #2a3a5e; border-color: var(--accent); color: #bae6fd; }
 
 .stream-status { font-size: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
 .broadcast-box { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
@@ -547,3 +911,30 @@ label.inline input { width: 74px; }
 }
 .toast.error { border-left-color: var(--danger); }
 .toast.ok { border-left-color: var(--ok); }
+
+/* ------------------------------------------- the program on a phone or a share */
+/* A shared screen is what everyone came to look at, so on a narrow screen it gets
+   the room to itself and the picture is never wrapped in empty black. */
+body.program-fill .layout > .panel:not(.program-panel),
+body.program-fill .layout > .stage,
+body.program-fill .layout > .sidebar { display: none; }
+body.program-fill .layout { grid-template-columns: minmax(0, 1fr); }
+body.program-fill .program-frame {
+  max-height: none; height: auto; border-radius: 0; border: 0;
+}
+body.program-fill .program-panel { padding: 0; background: none; border: 0; }
+body.program-fill .program-panel > .panel-head { display: none; }
+body.program-fill #program-canvas,
+body.program-fill .program-feed { max-height: calc(100vh - 56px); }
+
+@media (max-width: 720px) {
+  /* On a phone the program keeps the whole width, and the people below it - so a
+     share is seen at its best rather than shrunk inside a black box. */
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .program-frame { max-height: 60vh; }
+  .program-actions { opacity: 1; }
+  .participant-strip.slide .participant-tile { flex: 0 0 46vw; }
+  .remote-tile .name { font-size: 10.5px; }
+  .wave { height: 10px; }
+}
+

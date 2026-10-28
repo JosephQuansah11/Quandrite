@@ -29,12 +29,17 @@ export class StreamPublisher extends EventTarget {
   startedAt: any;
   timesliceMs: any;
   videoBitsPerSecond: any;
+  /** How long a change of on-air video waits for the burst of changes to settle. */
+  trackSwitchDelayMs: any;
+  _rebuildTimer: any;
+  _rebuilds: any;
   constructor({
     socket,
     compositor,
     videoBitsPerSecond = 6_000_000,
     audioBitsPerSecond = 160_000,
     timesliceMs = 500,
+    trackSwitchDelayMs = 800,
     logger = console,
   }: any = {}) {
     super();
@@ -43,6 +48,9 @@ export class StreamPublisher extends EventTarget {
     this.videoBitsPerSecond = videoBitsPerSecond;
     this.audioBitsPerSecond = audioBitsPerSecond;
     this.timesliceMs = timesliceMs;
+    this.trackSwitchDelayMs = trackSwitchDelayMs;
+    this._rebuildTimer = null;
+    this._rebuilds = 0;
     this.logger = logger;
     this.recorder = null;
     this.recorderStream = null;
@@ -130,20 +138,40 @@ export class StreamPublisher extends EventTarget {
    *
    * The program picture follows the studio (another camera, the grid, an overlay),
    * and the encoder is bound to the tracks it started with - so when the video
-   * source changes while live, the recorder is rebuilt on the new one. The relay
-   * rebuilds itself for that, exactly as it does when a destination is added.
+   * source changes while live, the recorder is rebuilt on the new one.
+   *
+   * The rebuild is **delayed and coalesced**, because a change rarely arrives
+   * alone: a source list settling, a scene switch or somebody's camera coming and
+   * going all fire in a burst, and each rebuild restarts the stream ffmpeg is
+   * reading - which the audience sees as a blink. Waiting for the burst to finish
+   * turns several restarts into one, and if the picture settles back to where it
+   * was there is no restart at all.
    */
   syncVideoTrack() {
     if (!this.active) return false;
     const wanted = this.compositor.programVideoTrack();
     const current = this.recorderStream?.getVideoTracks?.()[0] || null;
     if (!wanted || wanted === current) return false;
-    const stream = this.compositor.programStream();
-    this.stop();
-    return this.start(stream);
+    if (this._rebuildTimer) clearTimeout(this._rebuildTimer);
+    this._rebuildTimer = setTimeout(() => {
+      this._rebuildTimer = null;
+      if (!this.active) return;
+      const settled = this.compositor.programVideoTrack();
+      const live = this.recorderStream?.getVideoTracks?.()[0] || null;
+      if (!settled || settled === live) return;
+      this._rebuilds += 1;
+      const stream = this.compositor.programStream();
+      this.stop();
+      this.start(stream);
+    }, this.trackSwitchDelayMs);
+    return true;
   }
 
   stop() {
+    if (this._rebuildTimer) {
+      clearTimeout(this._rebuildTimer);
+      this._rebuildTimer = null;
+    }
     if (!this.recorder) return false;
     try {
       if (this.recorder.state !== 'inactive') this.recorder.stop();
@@ -163,6 +191,9 @@ export class StreamPublisher extends EventTarget {
       bytes: this.bytes,
       dropped: this.dropped,
       mimeType: this.recorder?.mimeType || null,
+      // How often the encoder has been rebuilt on a new video source: each one is
+      // a restart of the stream ffmpeg is reading, so this should stay small.
+      rebuilds: this._rebuilds,
     };
   }
 }

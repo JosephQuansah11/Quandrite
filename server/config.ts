@@ -91,12 +91,18 @@ export function loadConfig(overrides: any = {}) {
     process.env.QUANDRITE_RECORDINGS_DIR ||
     path.join(rootDir, 'recordings');
 
+  // Pictures sent in chat. They are written here and served back from `/uploads`, so a
+  // message can carry a URL instead of a megabyte of base64 over the socket.
+  const uploadsDir =
+    overrides.uploadsDir || process.env.QUANDRITE_UPLOADS_DIR || path.join(rootDir, 'uploads');
+
   const base = {
     rootDir,
     // The browser only ever sees the compiled client in `build/`.
     publicDir: path.join(rootDir, 'build', 'public'),
     sharedDir: path.join(rootDir, 'build', 'shared'),
     recordingsDir,
+    uploadsDir,
     host: process.env.QUANDRITE_HOST || '0.0.0.0',
     port: intEnv('PORT', intEnv('QUANDRITE_PORT', 8080)),
     ffmpegBin: resolveFfmpegBin(overrides.ffmpegBin),
@@ -150,6 +156,8 @@ export function loadConfig(overrides: any = {}) {
   config.iceServers = overrides.iceServers || iceServersFrom(config);
 
   fs.mkdirSync(config.recordingsDir, { recursive: true });
+  // Chat pictures live here too, so a fresh install can accept one immediately.
+  fs.mkdirSync(config.uploadsDir, { recursive: true });
   return config;
 }
 

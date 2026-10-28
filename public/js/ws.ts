@@ -7,7 +7,7 @@
  * carries a `payload` is dispatched as that payload, not as the envelope.
  */
 
-import { CLIENT, SERVER, decodeRelayFrame, encodeRelayFrame, isRelayFrame, pushPayload } from '/shared/protocol.js';
+import { CLIENT, SERVER, CLOCK_SYNC_INTERVAL_MS, clockOffsetNs, decodeRelayFrame, encodeRelayFrame, isRelayFrame, monotonicNs, nsToWire, pushPayload } from '/shared/protocol.js';
 
 export class QuandriteSocket extends EventTarget {
 
@@ -32,6 +32,13 @@ export class QuandriteSocket extends EventTarget {
     this.attempt = 0;
     this.manualClose = false;
     this.backpressureQueue = [];
+    // Nanosecond clock state: my offset to the server's clock, and the samples it
+    // was estimated from.
+    this.clockOffsetNs = null;
+    this.clockRoundTripNs = null;
+    this.clockSamples = [];
+    this.clockTimer = null;
+
   }
 
   get connected() {
@@ -52,6 +59,9 @@ export class QuandriteSocket extends EventTarget {
       this.attempt = 0;
       this._emit('open', {});
       this._flushBackpressure();
+      // The relay's nanosecond stamps are only meaningful against the server's
+      // clock, so measure the offset as soon as there is a connection.
+      this.startClockSync();
     });
 
     socket.addEventListener('message', (event) => {
@@ -182,11 +192,13 @@ export class QuandriteSocket extends EventTarget {
    * Post one relayed picture.
    *
    * Used when peer-to-peer cannot carry the camera or the screen, so the room
-   * still sees it over the socket the studio already uses.
+   * still sees it over the socket the studio already uses. A socket that is
+   * already behind is not worth adding to: queueing here would only mean the
+   * picture arrives later than it was taken.
    */
   sendRelayFrame(header, payload) {
     if (!this.connected) return false;
-    if (this.socket.bufferedAmount > 2 * 1024 * 1024) return false;
+    if (this.socket.bufferedAmount > 256 * 1024) return false;
     try {
       this.socket.send(encodeRelayFrame(header, payload));
       return true;
@@ -199,6 +211,92 @@ export class QuandriteSocket extends EventTarget {
     const queue = this.backpressureQueue;
     this.backpressureQueue = [];
     for (const frame of queue) this.sendBinary(frame);
+  }
+
+  /**
+   * Measure the offset between my clock and the server's, in nanoseconds.
+   *
+   * This is the exchange that makes nanosecond stamps mean anything: without it a
+   * stamp from another device is a number on a different clock, and the "lag"
+   * between them would be the difference between two wall clocks (seconds) rather
+   * than the time the picture spent on the wire. The reply carries the server's
+   * clock twice - on receipt and on send - so half the round trip can be taken off
+   * and what is left is the offset. The round trip is also the error bound, so the
+   * best sample wins rather than the latest.
+   */
+  syncClock() {
+    if (!this.connected) return Promise.resolve(null);
+    this.counter += 1;
+    const id = `clock-${this.counter}`;
+    const t0 = monotonicNs();
+    return new Promise((resolve) => {
+      const finish = (value) => {
+        clearTimeout(timer);
+        off();
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(null), 4000);
+      const off = this.on(SERVER.TIME_SYNC, (payload) => {
+        if (payload?.id !== id) return;
+        const sample = clockOffsetNs({ t0, t1: payload.t1, t2: payload.t2, t3: monotonicNs() });
+        if (sample) this._keepClockSample(sample);
+        finish(sample);
+      });
+      try {
+        this.socket.send(JSON.stringify({ type: CLIENT.TIME_SYNC, id }));
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
+  /**
+   * Keep the few best samples.
+   *
+   * A sample can only be wrong in one direction - a queue anywhere along the way
+   * adds delay - so the lowest round trips are the honest ones, and averaging them
+   * smooths out the jitter without dragging the estimate around.
+   */
+  _keepClockSample(sample) {
+    this.clockSamples.push(sample);
+    this.clockSamples.sort((a, b) => (a.roundTripNs < b.roundTripNs ? -1 : a.roundTripNs > b.roundTripNs ? 1 : 0));
+    this.clockSamples = this.clockSamples.slice(0, 5);
+    let total = 0n;
+    for (const entry of this.clockSamples) total += entry.offsetNs;
+    this.clockOffsetNs = total / BigInt(this.clockSamples.length);
+    this.clockRoundTripNs = this.clockSamples[0].roundTripNs;
+    this._emit('clock', {
+      offsetNs: nsToWire(this.clockOffsetNs),
+      roundTripNs: nsToWire(this.clockRoundTripNs),
+      samples: this.clockSamples.length,
+    });
+  }
+
+  /** Measure now, and keep measuring: clocks drift and networks change. */
+  startClockSync() {
+    if (this.clockTimer) return;
+    this.syncClock().catch(() => {});
+    this.clockTimer = setInterval(() => this.syncClock().catch(() => {}), CLOCK_SYNC_INTERVAL_MS);
+  }
+
+  stopClockSync() {
+    if (this.clockTimer) clearInterval(this.clockTimer);
+    this.clockTimer = null;
+  }
+
+  /**
+   * The server's clock, as well as this machine can tell.
+   *
+   * Everything the relay stamps is on this clock, so a stamp from any device can be
+   * compared with a reading from any other - which is the whole point.
+   */
+  serverNowNs() {
+    return monotonicNs() + (this.clockOffsetNs || 0n);
+  }
+
+  /** How well the offset is known: the round trip of the best sample. */
+  clockAccuracyNs() {
+    return this.clockRoundTripNs === null ? null : this.clockRoundTripNs / 2n;
   }
 
   on(type, handler) {
@@ -214,6 +312,7 @@ export class QuandriteSocket extends EventTarget {
 
   close() {
     this.manualClose = true;
+    this.stopClockSync();
     this.socket?.close();
   }
 }

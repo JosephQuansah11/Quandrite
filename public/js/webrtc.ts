@@ -8,6 +8,7 @@
  */
 
 import { CLIENT } from '/shared/protocol.js';
+import { MUSIC_BITRATE_BPS, VOICE_BITRATE_BPS, opusParameters, preferOpus } from '/shared/audio.js';
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -19,6 +20,16 @@ const ICE_SERVERS = [
  * output travels on its own peer connection instead of sharing the meeting's.
  */
 const PROGRAM_KIND = 'program';
+/**
+ * What each feed is worth on the wire.
+ *
+ * These are *ceilings*, not targets: WebRTC measures the path and sends less when
+ * it has to. A screen share is worth far more than a face - it is text, and text
+ * that is soft is useless - and it is told to hold its resolution and drop frames
+ * instead when the link tightens.
+ */
+export const CAMERA_MAX_BITRATE_BPS = 2_500_000;
+export const SCREEN_MAX_BITRATE_BPS = 6_000_000;
 
 export class MeetingMesh extends EventTarget {
 
@@ -187,7 +198,9 @@ export class MeetingMesh extends EventTarget {
     pc.onnegotiationneeded = async () => {
       try {
         peer.makingOffer = true;
-        await pc.setLocalDescription();
+        // The Opus parameters live in the offer, so it is built, tuned and then set.
+        // This is a room connection, so its audio is voice.
+        await pc.setLocalDescription(this._tuneOpus(await pc.createOffer()));
         await this._signal(peerId, { description: pc.localDescription });
       } catch (error) {
         // Somebody who left the room between the roster update and this offer:
@@ -223,6 +236,9 @@ export class MeetingMesh extends EventTarget {
 
     pc.onconnectionstatechange = () => {
       this._emit('peer-state', { peerId, state: pc.connectionState });
+      // Once the path is up, ask it for the best picture it can carry. Doing it
+      // here (rather than at addTrack time) is what makes the request stick.
+      if (pc.connectionState === 'connected') this._tuneConnection(peer);
       if (pc.connectionState === 'failed') {
         try {
           pc.restartIce();
@@ -293,7 +309,7 @@ export class MeetingMesh extends EventTarget {
     pc.onnegotiationneeded = async () => {
       try {
         peer.makingOffer = true;
-        await pc.setLocalDescription();
+        await pc.setLocalDescription(this._tuneOpus(await pc.createOffer(), { kind: PROGRAM_KIND }));
         await this._signal(peerId, { description: pc.localDescription, kind: PROGRAM_KIND });
       } catch (error) {
         // A peer that left between the roster update and this offer is normal.
@@ -318,12 +334,171 @@ export class MeetingMesh extends EventTarget {
     };
 
     pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') this._tuneConnection(peer, { kind: 'program' });
       if (!['failed', 'closed'].includes(pc.connectionState)) return;
       this._closeProgramPeer(peerId);
     };
 
     this._publishProgramTracks(peer);
     return peer;
+  }
+
+  /**
+   * Ask the connection for the best picture it can carry.
+   *
+   * WebRTC already has congestion control - it measures the path and changes what
+   * it sends - but it can only do that within the limits it is given, and the
+   * default limit for a video sender is low. So each sender is told what this feed
+   * is worth: a camera at 30 fps and a couple of megabits, a shared screen at a
+   * much higher ceiling with `maintain-resolution`, which tells the encoder to keep
+   * the pixels and drop frames instead when the link tightens - the right trade for
+   * text, and exactly the "1080p, but keep the network in check" behaviour we want.
+   *
+   * `contentHint` says what the pixels are for, and it is set on the track itself so
+   * the encoder honours it: `detail` for a screen (sharpness matters), `motion` for
+   * a camera (smoothness matters).
+   */
+  _tuneSender(sender, track, { kind = 'camera' } = {}) {
+    if (!sender) return false;
+    // The track's own hint is the source of truth about what the pixels *are*; the
+    // kind only sets the ceiling. A camera stays 'motion' even when it is the
+    // program, and a shared screen stays 'detail' wherever it is used.
+    const hinted = track?.contentHint === 'detail' || track?.contentHint === 'motion' ? track.contentHint : null;
+    const detail = kind === 'screen' || hinted === 'detail';
+    const maxBitrate = kind === 'program' || detail ? (detail ? SCREEN_MAX_BITRATE_BPS : CAMERA_MAX_BITRATE_BPS) : CAMERA_MAX_BITRATE_BPS;
+    const maxFramerate = detail ? 15 : 30;
+    try {
+      if (track && !hinted && 'contentHint' in track) track.contentHint = detail ? 'detail' : 'motion';
+    } catch {
+      // an older browser without contentHint is fine
+    }
+    try {
+      const params = sender.getParameters?.();
+      if (!params) return false;
+      if (!Array.isArray(params.encodings) || !params.encodings.length) params.encodings = [{}];
+      for (const encoding of params.encodings) {
+        encoding.maxBitrate = maxBitrate;
+        encoding.maxFramerate = maxFramerate;
+      }
+      // Only meaningful for video, and only where the browser accepts it.
+      params.degradationPreference = detail ? 'maintain-resolution' : 'balanced';
+      const applied = sender.setParameters(params);
+      if (applied?.catch) applied.catch(() => {});
+      return true;
+    } catch {
+      // Before negotiation settles the browser can refuse: the next attempt (on
+      // connected, or when the track is swapped) will land.
+      return false;
+    }
+  }
+
+  /**
+   * Tune every sender on a connection, once it has settled.
+   *
+   * Audio is tuned as well as video: an untuned Opus sender runs at the browser's
+   * default (~32 kbps, mono, DTX on), which is the sound of a phone call rather than a
+   * studio.
+   */
+  _tuneConnection(peer, { kind = 'camera' } = {}) {
+    if (!peer?.pc) return 0;
+    let tuned = 0;
+    for (const sender of peer.pc.getSenders?.() || []) {
+      if (sender.track?.kind === 'video') {
+        if (this._tuneSender(sender, sender.track, { kind })) tuned += 1;
+      } else if (sender.track?.kind === 'audio') {
+        if (this._tuneAudioSender(sender, { kind })) tuned += 1;
+      }
+    }
+    return tuned;
+  }
+
+  /**
+   * Ask for the audio quality this feed is worth.
+   *
+   * `maxBitrate` is the ceiling the sender is allowed, and the Opus parameters are what
+   * the encoder actually does with it - see `shared/audio.ts`. A shared screen's sound
+   * (and the program mix) is treated as music: stereo, no DTX, and a higher ceiling,
+   * because a voice-tuned encoder throws away exactly the parts music lives in.
+   */
+  _tuneAudioSender(sender, { kind = 'camera' } = {}) {
+    if (!sender) return false;
+    const music = kind === 'screen' || kind === 'program';
+    const maxBitrate = music ? MUSIC_BITRATE_BPS : VOICE_BITRATE_BPS;
+    try {
+      const params = sender.getParameters?.();
+      if (!params) return false;
+      if (!Array.isArray(params.encodings) || !params.encodings.length) params.encodings = [{}];
+      for (const encoding of params.encodings) {
+        encoding.maxBitrate = maxBitrate;
+        // Voice that arrives late is worse than voice that arrives thin.
+        encoding.priority = 'high';
+        encoding.networkPriority = 'high';
+      }
+      const applied = sender.setParameters(params);
+      if (applied?.catch) applied.catch(() => {});
+      return true;
+    } catch {
+      // Before negotiation settles the browser can refuse: the next attempt lands.
+      return false;
+    }
+  }
+
+  /**
+   * What the room's audio is actually doing.
+   *
+   * The interesting numbers are not "is audio connected" but what the encoder was told:
+   * the sample rate and channels the device gave, the bitrate ceiling the sender was
+   * set to, and the Opus parameters both sides settled on. That is what says whether a
+   * quiet call is a device problem, a network problem, or a setting nobody applied.
+   */
+  audioQuality() {
+    const describe = (peer: any) => {
+      const senders = (peer.pc?.getSenders?.() || []).filter((sender: any) => sender.track?.kind === 'audio');
+      return {
+        id: peer.id,
+        connection: peer.pc?.connectionState ?? null,
+        sending: senders.map((sender: any) => {
+          const params = sender.getParameters?.() || {};
+          const encoding = params.encodings?.[0] || {};
+          const settings = sender.track?.getSettings?.() || {};
+          return {
+            sampleRate: settings.sampleRate ?? null,
+            channels: settings.channelCount ?? null,
+            maxBitrate: encoding.maxBitrate ?? null,
+            priority: encoding.priority ?? null,
+          };
+        }),
+        // Read from both descriptions: the offer carries the offerer's parameters, the
+        // answer the answerer's.
+        opus: opusParameters(peer.pc?.localDescription?.sdp) || opusParameters(peer.pc?.remoteDescription?.sdp),
+      };
+    };
+    return {
+      room: [...this.peers.values()].map(describe),
+      program: [...this.programPeers.values()].map(describe),
+    };
+  }
+
+  /**
+   * Rewrite the local description so its Opus is tuned.
+   *
+   * The encoder's settings live in the SDP's `fmtp` line, and the line only exists in
+   * the description this side offers - so the offer is rewritten before it is set. A
+   * description without Opus (no audio track) comes back untouched.
+   */
+  _tuneOpus(description, { kind = 'camera' } = {}) {
+    if (!description?.sdp) return description;
+    const music = kind === 'screen' || kind === 'program';
+    return {
+      ...description,
+      sdp: preferOpus(description.sdp, {
+        maxaveragebitrate: music ? MUSIC_BITRATE_BPS : VOICE_BITRATE_BPS,
+        stereo: music,
+        // DTX stops sending during quiet passages: right for a phone, wrong for music.
+        usedtx: false,
+        useinbandfec: true,
+      }),
+    };
   }
 
   /** Add (or swap) the program tracks on one connection. */
@@ -387,7 +562,9 @@ export class MeetingMesh extends EventTarget {
 
         await pc.setRemoteDescription(data.description);
         if (data.description.type === 'offer') {
-          await pc.setLocalDescription();
+          // An answer carries this side's own Opus parameters, so it is tuned too - and
+          // a program answer is tuned as music, because that is what it is carrying.
+          await pc.setLocalDescription(this._tuneOpus(await pc.createAnswer(), { kind: data.kind }));
           await this._signal(from, { description: pc.localDescription, ...echo });
         }
       } else if (data.candidate) {
@@ -438,10 +615,17 @@ export class MeetingMesh extends EventTarget {
     }
   }
 
-  setMicEnabled(enabled) {
+  /**
+   * Mute or unmute the microphone tracks.
+   *
+   * The caller says which tracks are the microphone: the mesh publishes whatever it is
+   * given, and a shared screen's audio is not a microphone - reaching for "all audio
+   * tracks" here would silence what somebody is presenting.
+   */
+  setMicEnabled(enabled, tracks = null) {
     this.micEnabled = enabled;
-    if (!this.localStream) return;
-    for (const track of this.localStream.getAudioTracks()) track.enabled = enabled;
+    const list = Array.isArray(tracks) && tracks.length ? tracks : this.localStream?.getAudioTracks?.() || [];
+    for (const track of list) track.enabled = enabled;
     this._emit('local-state', { micEnabled: enabled, cameraEnabled: this.cameraEnabled });
   }
 
