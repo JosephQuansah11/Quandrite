@@ -190,6 +190,79 @@ export function validateEnvelope(raw) {
   return { ok: true, value: raw };
 }
 
+/**
+ * The body of a server push.
+ *
+ * Studio pushes (`members:update`, `sources:update`, `program:update`,
+ * `breakout:update`, ...) carry their content in `payload`, and the client
+ * transport dispatches the payload itself, so a handler sees the roster array or
+ * the snapshot it asked for. The flat messages (`welcome`, `member:media`,
+ * `webrtc:signal`, `pong`) carry no `payload` and are dispatched whole, and a
+ * cleared scene (`payload: null`) stays `null` instead of falling back to the
+ * envelope.
+ */
+export function pushPayload(message) {
+  if (message === null || typeof message !== 'object') return message;
+  return message.payload === undefined ? message : message.payload;
+}
+
+// --------------------------------------------------------------- media relay
+
+/**
+ * Magic that marks a binary frame as a relayed picture rather than a program
+ * chunk. A WebM/Matroska program chunk starts with the EBML magic (0x1A45DFA3),
+ * so the two can never be confused.
+ */
+export const RELAY_MAGIC = 'QMR1';
+/** How many relayed pictures a second the server passes on, per sender. */
+export const RELAY_MAX_FPS = 8;
+
+const relayText = new TextEncoder();
+const relayReader = new TextDecoder();
+
+/**
+ * Wrap one relayed picture: `magic | header length | header JSON | JPEG bytes`.
+ *
+ * The header says what the picture is (`from`, `fromName`, `sourceId`, `kind`,
+ * `label`, `w`, `h`), so the room can match it to the right camera or screen.
+ */
+export function encodeRelayFrame(header: any = {}, payload: any = new Uint8Array()) {
+  const body = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+  const json = relayText.encode(JSON.stringify(header || {}));
+  const frame = new Uint8Array(8 + json.length + body.length);
+  for (let index = 0; index < 4; index += 1) frame[index] = RELAY_MAGIC.charCodeAt(index);
+  new DataView(frame.buffer).setUint32(4, json.length, false);
+  frame.set(json, 8);
+  frame.set(body, 8 + json.length);
+  return frame;
+}
+
+/** True when `buffer` is a relayed picture (and not a program chunk). */
+export function isRelayFrame(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  if (bytes.length < 8) return false;
+  for (let index = 0; index < 4; index += 1) {
+    if (bytes[index] !== RELAY_MAGIC.charCodeAt(index)) return false;
+  }
+  return true;
+}
+
+/** @returns {{header: any, payload: Uint8Array} | null} */
+export function decodeRelayFrame(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  if (!isRelayFrame(bytes)) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const length = view.getUint32(4, false);
+  if (bytes.length < 8 + length) return null;
+  let header: any = {};
+  try {
+    header = JSON.parse(relayReader.decode(bytes.subarray(8, 8 + length)));
+  } catch {
+    return null;
+  }
+  return { header, payload: bytes.subarray(8 + length) };
+}
+
 // ------------------------------------------------------------------ contracts
 
 /** A role that may drive the broadcast. */

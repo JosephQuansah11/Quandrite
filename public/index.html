@@ -6,6 +6,11 @@
     <title>Quandrite Studio</title>
     <meta name="description" content="Quandrite - chat, meetings and multi-platform livestreaming studio" />
     <link rel="stylesheet" href="/styles.css" />
+    <!-- Inline so the browser never asks for a /favicon.ico the server does not have. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b1220'/%3E%3Ctext x='16' y='23' font-family='system-ui,sans-serif' font-size='19' font-weight='700' text-anchor='middle' fill='%2367e8f9'%3EQ%3C/text%3E%3C/svg%3E"
+    />
   </head>
   <body>
     <header class="topbar">
@@ -17,31 +22,12 @@
         </div>
       </div>
 
-      <form id="join-form" class="join-form">
-        <input id="join-name" name="name" placeholder="Your name" autocomplete="name" required />
-        <input id="join-room" name="room" placeholder="Room code" autocomplete="off" required />
-        <select id="join-role" name="role" title="Join as - the first person in a brand new room becomes the host">
-          <option value="host">Host</option>
-          <option value="cohost">Co-host</option>
-          <option value="viewer" selected>Viewer</option>
-          <option value="visitor">Visitor</option>
-        </select>
-        <input
-          id="join-password"
-          name="password"
-          type="password"
-          autocomplete="off"
-          placeholder="Role password"
-          title="Required to claim the host or co-host role - viewers and visitors need no password"
-        />
-        <button type="submit" class="primary">Join</button>
-      </form>
-
-      <div class="pane-toggles" id="pane-toggles" role="group" aria-label="Show or hide panes">
-        <button data-pane="program" class="tiny ghost" aria-pressed="true">Program</button>
-        <button data-pane="participants" class="tiny ghost" aria-pressed="true">Participants</button>
-        <button data-pane="sources" class="tiny ghost" aria-pressed="true" data-requires="control">Cameras</button>
-        <button data-pane="sidebar" class="tiny ghost" aria-pressed="true">Sidebar</button>
+      <!-- Only the essentials stay up here: who you are, where you are, your
+           state, and the way out. Everything else lives on the landing page or
+           inside a collapsible pane. -->
+      <div class="who" id="who">
+        <span id="name-pill" class="pill">not joined</span>
+        <span id="room-pill" class="pill">no room</span>
       </div>
 
       <div class="status-cluster">
@@ -51,49 +37,158 @@
         <span id="live-pill" class="pill">off air</span>
         <span id="rec-pill" class="pill">not recording</span>
       </div>
+
+      <button type="button" id="btn-share" class="share-button hidden" title="Share your camera or screen with the room">
+        <svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><path d="M8 7l4-4 4 4"/><path d="M5 13v6h14v-6"/></svg>
+        <span>Share</span>
+      </button>
+
+      <button type="button" id="btn-leave-room" class="leave-button hidden" title="Leave this room">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+          <path
+            fill="currentColor"
+            d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5v-2H5V5h5V3zm7.6 4.6L16.2 9l2 2H9v2h9.2l-2 2 1.4 1.4L22 12l-4.4-4.4z"
+          />
+        </svg>
+        Leave
+      </button>
     </header>
 
-    <main class="layout">
-      <section class="stage">
-        <div class="panel program-panel" data-pane="program">
-          <div class="panel-head">
-            <h2>Program preview <small>(what your viewers receive)</small></h2>
-            <div class="program-meta">
-              <span id="program-preset">1080p30</span>
-              <span id="program-bitrate">0 kbps</span>
-              <span id="program-uptime">00:00</span>
-            </div>
+    <section id="landing" class="landing">
+      <div class="landing-card">
+        <h1>Join a room</h1>
+        <p class="muted">
+          Meetings, chat and a multi-platform livestreaming studio. Enter a room code to
+          begin - the first person in a brand new room becomes the host.
+        </p>
+        <form id="join-form" class="form">
+          <label>Your name
+            <input id="join-name" name="name" placeholder="Your name" autocomplete="name" required />
+          </label>
+          <label>Room code
+            <input id="join-room" name="room" placeholder="Room code" autocomplete="off" required />
+          </label>
+          <label>Join as
+            <select id="join-role" name="role" title="Join as - the first person in a brand new room becomes the host">
+              <option value="host">Host</option>
+              <option value="cohost">Co-host</option>
+              <option value="viewer" selected>Viewer</option>
+              <option value="visitor">Visitor</option>
+            </select>
+          </label>
+          <label id="join-password-row" class="hidden">Role password
+            <input
+              id="join-password"
+              name="password"
+              type="password"
+              autocomplete="off"
+              placeholder="Role password"
+              title="Required to claim the host or co-host role - viewers and visitors need no password"
+            />
+          </label>
+          <!-- A brand new room has no host yet: the password page that follows
+               the join form is where the seat gets protected. -->
+          <button type="submit" id="btn-join" class="primary wide">Join</button>
+        </form>
+        <div id="join-status" class="muted"></div>
+      </div>
+    </section>
+
+    <!-- The host password lives on its own page between the join form and the
+         room, so nothing is asked once the studio is open. -->
+    <section id="password-page" class="landing hidden">
+      <div class="landing-card">
+        <h1>Protect the host seat</h1>
+        <p class="muted">
+          This room has no password yet, so the next person to join an empty room would take
+          the host seat. Set a host password now and only you - or whoever you share it with -
+          can claim it. You can change it later in the room's settings.
+        </p>
+        <div class="dialog-actions">
+          <input id="password-suggested" type="text" readonly aria-label="Suggested password" />
+          <button type="button" id="btn-new-suggestion" class="tiny ghost">New suggestion</button>
+          <button type="button" id="btn-use-suggestion" class="tiny primary">Use this</button>
+        </div>
+        <form id="password-form" class="form">
+          <label>Host password
+            <input id="password-host" name="hostPassword" type="text" autocomplete="off" required />
+          </label>
+          <label>Co-host password <small>(optional - people claim co-host with it)</small>
+            <input id="password-cohost" name="cohostPassword" type="text" autocomplete="off" />
+          </label>
+          <button type="submit" class="primary wide">Save password and enter the room</button>
+        </form>
+        <div class="dialog-actions">
+          <button type="button" id="btn-skip-password" class="tiny ghost">Later - enter the room</button>
+        </div>
+        <div id="password-status" class="muted"></div>
+      </div>
+    </section>
+
+    <div id="connection-banner" class="connection-banner hidden" role="status" aria-live="polite">
+      <span id="connection-banner-text">Connecting to the studio server&hellip;</span>
+      <button id="btn-retry-connection" class="tiny primary">Retry now</button>
+    </div>
+
+    <main class="layout" id="studio">
+      <div class="panel program-panel" data-pane="program">
+        <div class="panel-head">
+          <h2>Program preview <small>(what your viewers receive)</small></h2>
+          <div class="program-meta">
+            <span id="program-preset">1080p30</span>
+            <span id="program-bitrate">0 kbps</span>
+            <span id="program-uptime">00:00</span>
           </div>
-          <div id="breakout-banner" class="breakout-banner hidden">
-            <span id="breakout-banner-text">You are in a breakout room.</span>
-            <button id="btn-leave-breakout" class="tiny">Back to the main room</button>
+          <button type="button" class="pane-toggle" data-pane="program" aria-pressed="true" title="Collapse or expand this pane"><svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></button>
+        </div>
+        <div id="breakout-banner" class="breakout-banner hidden">
+          <span id="breakout-banner-text">You are in a breakout room.</span>
+          <button id="btn-leave-breakout" class="tiny">Back to the main room</button>
+        </div>
+        <div class="program-frame">
+          <canvas id="program-canvas" width="1920" height="1080"></canvas>
+          <!-- The real program feed, sent peer to peer by the room's owner. -->
+          <video id="program-feed" class="program-feed hidden" autoplay playsinline></video>
+          <div class="program-overlay-badges">
+            <span id="program-feed-pill" class="badge feed hidden">live program</span>
+            <span id="canvas-live-badge" class="badge live hidden">LIVE</span>
+            <span id="canvas-rec-badge" class="badge rec hidden">REC</span>
           </div>
-          <div class="program-frame">
-            <canvas id="program-canvas" width="1920" height="1080"></canvas>
-            <div class="program-overlay-badges">
-              <span id="canvas-live-badge" class="badge live hidden">LIVE</span>
-              <span id="canvas-rec-badge" class="badge rec hidden">REC</span>
-            </div>
-            <div id="program-empty" class="empty-hint">
-              Add a camera or share your screen to build the program picture.
-            </div>
-          </div>
-          <div class="program-controls">
-            <div class="segmented" id="program-mode" data-requires="control">
-              <button data-mode="single" class="active">Single camera</button>
-              <button data-mode="grid">All cameras</button>
-              <button data-mode="screenshare">Screen</button>
-            </div>
-            <span id="on-air-label" class="muted">On air: -</span>
+          <div id="program-empty" class="empty-hint">
+            Add a camera or share your screen to build the program picture.
           </div>
         </div>
-
-        <div class="panel participants-panel" data-pane="participants">
-          <div class="panel-head">
-            <h2>In this room <small id="participant-room-label">main room</small></h2>
-            <span id="participant-count" class="muted">0 here</span>
+        <div class="program-controls">
+          <div class="segmented" id="program-mode" data-requires="control">
+            <button data-mode="single" class="active">Single camera</button>
+            <button data-mode="grid">All cameras</button>
+            <button data-mode="screenshare">Screen</button>
           </div>
-          <div id="participant-strip" class="participant-strip"></div>
+          <span id="on-air-label" class="muted">On air: -</span>
+        </div>
+      </div>
+
+      <div class="panel participants-panel" data-pane="participants">
+        <div class="panel-head">
+          <h2>In this room <small id="participant-room-label">main room</small></h2>
+          <span id="participant-count" class="muted">0 here</span>
+          <div class="segmented" id="people-view" role="group" aria-label="How to show the people in the room">
+            <button type="button" data-view="slide" class="active">Slide</button>
+            <button type="button" data-view="grid">Grid</button>
+            <button type="button" data-view="list">List</button>
+          </div>
+          <button type="button" class="pane-toggle" data-pane="participants" aria-pressed="true" title="Collapse or expand this pane"><svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></button>
+        </div>
+        <div id="participant-strip" class="participant-strip"></div>
+      </div>
+
+      <section class="stage">
+        <div class="panel grid-panel" id="grid-panel" data-pane="grid" data-requires="control">
+          <div class="panel-head">
+            <h2>Grid preview <small id="grid-preview-summary">No cameras or screens yet.</small></h2>
+            <button type="button" class="pane-toggle" data-pane="grid" aria-pressed="true" title="Collapse or expand this pane"><svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></button>
+          </div>
+          <div id="grid-preview" class="grid-preview"></div>
         </div>
 
         <div class="panel sources-panel" id="sources-panel" data-pane="sources" data-requires="control">
@@ -102,6 +197,7 @@
             <div class="source-actions">
               <button id="btn-open-devices" class="primary">Cameras &amp; screens</button>
             </div>
+            <button type="button" class="pane-toggle" data-pane="sources" aria-pressed="true" title="Collapse or expand this pane"><svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></button>
           </div>
           <div id="source-requests" class="source-requests muted"></div>
           <div id="device-list" class="device-list"></div>
@@ -112,14 +208,43 @@
       </section>
 
       <aside class="sidebar" data-pane="sidebar">
+        <div class="sidebar-head">
+          <strong>Studio</strong>
+          <button type="button" class="pane-toggle" data-pane="sidebar" aria-pressed="true" title="Collapse or expand the studio sidebar"><svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6l-6 6 6 6"/></svg></button>
+        </div>
         <nav class="tabs" id="tabs">
           <button data-tab="scenes" class="active">Scenes</button>
           <button data-tab="people">People</button>
           <button data-tab="platforms">Go live</button>
           <button data-tab="chat">Chat</button>
           <button data-tab="meeting">Meeting</button>
+          <button data-tab="share">Share</button>
           <button data-tab="recordings">Library</button>
         </nav>
+
+        <!-- Cameras & screens live in a tab of the studio, not in a dialog: the
+             room's Share button opens it, and anyone can publish from here. -->
+        <div class="tab-panel hidden" data-panel="share">
+          <p id="share-status" class="muted">
+            Tick what to publish, then choose where it goes: the studio, the grid, or straight on air.
+          </p>
+          <div id="device-list-picker" class="device-picker"></div>
+          <div class="dialog-actions">
+            <button type="button" id="btn-devices-studio" class="tiny">Add to studio</button>
+            <button type="button" id="btn-devices-grid" class="tiny primary">Add to grid</button>
+            <button type="button" id="btn-devices-air" class="tiny">Put on air</button>
+          </div>
+          <div class="dialog-actions">
+            <label class="toggle" title="Include system audio in the screen share">
+              <input id="screen-audio" type="checkbox" checked />
+              <span>with sound</span>
+            </label>
+            <button type="button" id="btn-devices-screen" class="tiny ghost">Share screen</button>
+            <button type="button" id="btn-devices-bluetooth" class="tiny ghost" title="Pair a Bluetooth camera (phone, action cam)">
+              Pair Bluetooth
+            </button>
+          </div>
+        </div>
 
         <div class="tab-panel" data-panel="scenes">
           <div class="scene-buttons" id="scene-buttons" data-requires="control"></div>
@@ -186,8 +311,13 @@
               <label>Co-host password
                 <input id="credential-cohost" name="cohostPassword" type="text" autocomplete="off" />
               </label>
-              <button type="submit" class="primary wide">Save passwords</button>
+              <button type="submit" id="btn-save-passwords" class="primary wide">Save passwords</button>
             </form>
+            <div class="row wrap">
+              <button id="btn-generate-passwords" class="ghost tiny" title="Fill the fields with strong passwords">
+                Generate passwords
+              </button>
+            </div>
             <div class="row wrap">
               <button id="btn-copy-host-password" class="ghost tiny">Copy host password</button>
               <button id="btn-copy-cohost-password" class="ghost tiny">Copy co-host password</button>
@@ -249,8 +379,14 @@
           <div class="row wrap">
             <button id="btn-join-call" class="primary">Join call</button>
             <button id="btn-leave-call" class="ghost" disabled>Leave</button>
-            <button id="btn-toggle-mic" class="ghost" disabled>Mute</button>
-            <button id="btn-toggle-cam" class="ghost" disabled>Camera off</button>
+            <button id="btn-toggle-mic" class="ghost" disabled>
+              <svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18.5V21"/><path d="M8.5 21h7"/></svg>
+              <span>Mute</span>
+            </button>
+            <button id="btn-toggle-cam" class="ghost" disabled>
+              <svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5h10.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3z"/><path d="M15.5 11.2 21 8v8l-5.5-3.2z"/></svg>
+              <span>Camera off</span>
+            </button>
           </div>
           <ul id="member-list" class="list"></ul>
           <div id="remote-grid" class="remote-grid"></div>
@@ -262,32 +398,6 @@
         </div>
       </aside>
     </main>
-
-    <dialog id="device-dialog" class="device-dialog">
-      <div class="dialog-head">
-        <h2>Cameras &amp; screens</h2>
-        <button id="device-dialog-close" class="tiny ghost">Close</button>
-      </div>
-      <p id="device-dialog-status" class="muted">
-        Tick what to publish, then choose where it goes: the studio, the grid, or straight on air.
-      </p>
-      <div id="device-list-picker" class="device-picker"></div>
-      <div class="dialog-actions">
-        <button id="btn-devices-studio" class="tiny">Add to studio</button>
-        <button id="btn-devices-grid" class="tiny primary">Add to grid</button>
-        <button id="btn-devices-air" class="tiny">Put on air</button>
-      </div>
-      <div class="dialog-actions">
-        <label class="toggle" title="Include system audio in the screen share">
-          <input id="screen-audio" type="checkbox" checked />
-          <span>with sound</span>
-        </label>
-        <button id="btn-devices-screen" class="tiny ghost">Share screen</button>
-        <button id="btn-devices-bluetooth" class="tiny ghost" title="Pair a Bluetooth camera (phone, action cam)">
-          Pair Bluetooth
-        </button>
-      </div>
-    </dialog>
 
     <div id="toasts" class="toasts"></div>
     <script type="module" src="/js/app.js"></script>

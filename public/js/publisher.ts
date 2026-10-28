@@ -24,6 +24,7 @@ export class StreamPublisher extends EventTarget {
   dropped: any;
   logger: any;
   recorder: any;
+  recorderStream: any;
   socket: any;
   startedAt: any;
   timesliceMs: any;
@@ -44,6 +45,7 @@ export class StreamPublisher extends EventTarget {
     this.timesliceMs = timesliceMs;
     this.logger = logger;
     this.recorder = null;
+    this.recorderStream = null;
     this.startedAt = null;
     this.chunks = 0;
     this.bytes = 0;
@@ -70,17 +72,17 @@ export class StreamPublisher extends EventTarget {
     return '';
   }
 
-  start() {
+  start(stream = null) {
     if (this.active) return false;
     if (typeof MediaRecorder === 'undefined') {
       this._emit('error', { message: 'this browser cannot encode a livestream (MediaRecorder missing)' });
       return false;
     }
 
-    const stream = this.compositor.programStream();
+    const source = stream || this.compositor.programStream();
     const mimeType = this.pickMimeType();
     try {
-      this.recorder = new MediaRecorder(stream, {
+      this.recorder = new MediaRecorder(source, {
         mimeType: mimeType || undefined,
         videoBitsPerSecond: this.videoBitsPerSecond,
         audioBitsPerSecond: this.audioBitsPerSecond,
@@ -89,6 +91,7 @@ export class StreamPublisher extends EventTarget {
       this._emit('error', { message: `could not start the encoder: ${error.message}` });
       return false;
     }
+    this.recorderStream = source;
 
     this.chunks = 0;
     this.bytes = 0;
@@ -120,6 +123,24 @@ export class StreamPublisher extends EventTarget {
     this.recorder.start(this.timesliceMs);
     this._emit('started', this.stats());
     return true;
+  }
+
+  /**
+   * Keep the encoder on the real on-air video.
+   *
+   * The program picture follows the studio (another camera, the grid, an overlay),
+   * and the encoder is bound to the tracks it started with - so when the video
+   * source changes while live, the recorder is rebuilt on the new one. The relay
+   * rebuilds itself for that, exactly as it does when a destination is added.
+   */
+  syncVideoTrack() {
+    if (!this.active) return false;
+    const wanted = this.compositor.programVideoTrack();
+    const current = this.recorderStream?.getVideoTracks?.()[0] || null;
+    if (!wanted || wanted === current) return false;
+    const stream = this.compositor.programStream();
+    this.stop();
+    return this.start(stream);
   }
 
   stop() {

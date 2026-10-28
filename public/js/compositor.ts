@@ -132,11 +132,35 @@ export class ProgramCompositor {
     this.canvasStream = null;
   }
 
-  /** The stream handed to the publisher: canvas video + mixed program audio. */
+  /**
+   * The video that should go out right now.
+   *
+   * A single camera or screen goes out as **its own track** - the real streaming
+   * video, with no canvas in the way - and only what genuinely has to be
+   * composited (the grid, or an overlay on air) is drawn on the canvas. That is
+   * also what a viewer's picture is built from, so the room watches the same
+   * real video the platforms receive.
+   */
+  programVideoTrack() {
+    // An overlay has to be drawn somewhere, and the canvas is that somewhere.
+    if (this.scene) return this.videoTrack;
+    const sources = this.activeSources().filter((source) => source.kind !== 'audio');
+    if (sources.length !== 1) return this.videoTrack;
+    const source = sources[0];
+    if (!['camera', 'screen', 'virtual'].includes(source.kind)) return this.videoTrack;
+    return source.stream?.getVideoTracks?.()[0] || this.videoTrack;
+  }
+
+  /**
+   * The stream handed to the publisher and to the room: the program video (a real
+   * source track when there is only one, the canvas otherwise) plus the mixed
+   * program audio.
+   */
   programStream() {
     if (!this.canvasStream) this.start();
     const tracks = [];
-    if (this.videoTrack) tracks.push(this.videoTrack);
+    const video = this.programVideoTrack();
+    if (video) tracks.push(video);
     const audioTracks = this.audioDestination?.stream?.getAudioTracks?.() || [];
     tracks.push(...audioTracks);
     return new MediaStream(tracks);
@@ -246,7 +270,7 @@ export class ProgramCompositor {
     ctx.fillStyle = '#04070f';
     ctx.fillRect(0, 0, W, H);
 
-    const model = overlayDrawModel(this.scene, { width: W, height: H });
+    const model = overlayDrawModel(this.scene, { width: W, height: H, now: Date.now() });
     if (!model.blocksProgram) this._drawSources(ctx, W, H);
     this._drawOps(ctx, model.ops);
     this._drawBadges(ctx, W, H);
@@ -287,17 +311,22 @@ export class ProgramCompositor {
 
   _drawTile(ctx, source, rect, W, H) {
     const video = source.video;
+    // A relayed picture is an <img>; a live feed is a <video>. Both are drawn
+    // the same way, and neither is ever mirrored.
+    const isImage = video?.tagName === 'IMG';
+    const frameWidth = isImage ? video.naturalWidth : video?.videoWidth || 0;
+    const frameHeight = isImage ? video.naturalHeight : video?.videoHeight || 0;
     ctx.save();
     roundRect(ctx, rect.x, rect.y, rect.w, rect.h, Math.round(H * 0.008));
     ctx.clip();
     ctx.fillStyle = '#05080f';
     ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
-    const ready = video && video.readyState >= 2 && video.videoWidth > 0;
+    const ready = isImage ? Boolean(video.complete) && frameWidth > 0 : Boolean(video) && video.readyState >= 2 && frameWidth > 0;
     if (ready) {
-      const scale = Math.max(rect.w / video.videoWidth, rect.h / video.videoHeight);
-      const drawW = video.videoWidth * scale;
-      const drawH = video.videoHeight * scale;
+      const scale = Math.max(rect.w / frameWidth, rect.h / frameHeight);
+      const drawW = frameWidth * scale;
+      const drawH = frameHeight * scale;
       try {
         ctx.drawImage(video, rect.x + (rect.w - drawW) / 2, rect.y + (rect.h - drawH) / 2, drawW, drawH);
       } catch {

@@ -85,6 +85,11 @@ function clampDuration(value, fallback) {
   return Math.min(Math.round(number), 12 * 60 * 60 * 1000);
 }
 
+/** A countdown is a duration that is allowed to be zero (nothing is drawn). */
+function clampCountdownMs(value) {
+  return Math.min(Math.max(0, Math.round(Number(value) || 0)), 12 * 60 * 60 * 1000);
+}
+
 /**
  * Validate + normalise an overlay request.
  * @returns {{ok: true, value: object} | {ok: false, errors: string[]}}
@@ -112,6 +117,8 @@ export function validateOverlay(input: any = {}) {
     case 'announcement': {
       payload.message = cleanText(raw.message, 240);
       payload.priority = ANNOUNCEMENT_PRIORITIES.includes(raw.priority) ? raw.priority : 'normal';
+      // An announcement can carry a countdown ("doors open in 05:00").
+      payload.countdownMs = clampCountdownMs(raw.countdownMs);
       if (!payload.message) errors.push('announcement.message is required');
       break;
     }
@@ -133,10 +140,7 @@ export function validateOverlay(input: any = {}) {
     }
     case 'break': {
       payload.message = cleanText(raw.message, 200) || 'We are right back.';
-      payload.countdownMs = Math.min(
-        Math.max(0, Math.round(Number(raw.countdownMs) || 0)),
-        12 * 60 * 60 * 1000,
-      );
+      payload.countdownMs = clampCountdownMs(raw.countdownMs);
       break;
     }
     case 'ended': {
@@ -152,9 +156,15 @@ export function validateOverlay(input: any = {}) {
   if (errors.length) return { ok: false, errors };
 
   const persistentRequested = input.persistent === true || raw.persistent === true;
-  const durationMs = persistentRequested
+  const countdownMs = Number(payload.countdownMs) || 0;
+  // A countdown is a promise to come back: when it reaches zero the card has to
+  // leave the air by itself, so the countdown (when it is longer than the
+  // duration) becomes the lifetime of the scene instead of leaving it up until
+  // somebody clears it.
+  const requestedDuration = persistentRequested
     ? 0
     : clampDuration(input.durationMs ?? raw.durationMs, definition.defaultDurationMs);
+  const durationMs = Math.max(requestedDuration, countdownMs);
 
   return {
     ok: true,
@@ -226,6 +236,23 @@ export function formatCountdown(ms) {
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
 }
 
+/**
+ * The countdown still left on a scene.
+ *
+ * The payload holds the countdown that was asked for; the picture has to show
+ * what is left of it, so the time already elapsed since the scene was created is
+ * subtracted. A scene without a timestamp (a bare fixture) shows the requested
+ * value as it is, which keeps the pure draw model deterministic for tests.
+ */
+export function remainingCountdownMs(scene, now = Date.now()) {
+  const requested = Number(scene?.payload?.countdownMs) || 0;
+  if (requested <= 0) return 0;
+  const createdAt = Number(scene?.createdAt);
+  if (!Number.isFinite(createdAt)) return requested;
+  const elapsed = Math.max(0, Number(now) - createdAt);
+  return Math.max(0, requested - elapsed);
+}
+
 const rect = (x, y, w, h, fill, extra: any = {}) => ({
   kind: 'rect',
   x: Math.round(x),
@@ -280,10 +307,11 @@ function drawTitle(payload, W, H) {
   ];
 }
 
-function drawAnnouncement(payload, W, H) {
+function drawAnnouncement(payload, W, H, context: any = {}) {
   const bannerH = H * 0.11;
   const high = payload.priority === 'high';
-  return [
+  const countdownMs = Number(context.countdownMs) || 0;
+  const ops = [
     rect(0, 0, W, bannerH, high ? 'rgba(220,38,38,0.92)' : 'rgba(37,99,235,0.92)'),
     text(W / 2, bannerH / 2, payload.message, {
       size: H * 0.04,
@@ -291,9 +319,27 @@ function drawAnnouncement(payload, W, H) {
       color: '#ffffff',
       align: 'center',
       baseline: 'middle',
-      maxWidth: W * 0.9,
+      // Leave room for the countdown badge when there is one.
+      maxWidth: W * (countdownMs > 0 ? 0.6 : 0.9),
     }),
   ];
+  if (countdownMs > 0) {
+    const badgeW = W * 0.17;
+    const badgeH = bannerH * 0.6;
+    const x = W - badgeW - H * 0.022;
+    const y = (bannerH - badgeH) / 2;
+    ops.push(
+      rect(x, y, badgeW, badgeH, 'rgba(2,6,23,0.5)', { radius: badgeH / 2 }),
+      text(x + badgeW / 2, bannerH / 2, formatCountdown(countdownMs), {
+        size: H * 0.036,
+        weight: 800,
+        color: '#ffffff',
+        align: 'center',
+        baseline: 'middle',
+      }),
+    );
+  }
+  return ops;
 }
 
 function drawScreenshare(payload, W, H) {
@@ -399,7 +445,8 @@ function drawSong(payload, W, H) {
   return ops;
 }
 
-function drawBreak(payload, W, H) {
+function drawBreak(payload, W, H, context: any = {}) {
+  const countdownMs = Number(context.countdownMs) || 0;
   const ops = [
     rect(0, 0, W, H, 'rgba(2,6,23,0.94)'),
     rect(0, H * 0.435, W, H * 0.006, OVERLAY_DEFINITIONS.break.accent),
@@ -420,9 +467,9 @@ function drawBreak(payload, W, H) {
       maxWidth: W * 0.8,
     }),
   ];
-  if (payload.countdownMs > 0) {
+  if (countdownMs > 0) {
     ops.push(
-      text(W / 2, H * 0.66, formatCountdown(payload.countdownMs), {
+      text(W / 2, H * 0.66, formatCountdown(countdownMs), {
         size: H * 0.05,
         weight: 700,
         color: '#f8fafc',
@@ -484,7 +531,7 @@ const DRAWERS = Object.freeze({
  * uses `blocksProgram` to know whether camera / screen pixels are still
  * visible underneath the overlay.
  */
-export function overlayDrawModel(scene, { width, height }: any = {}) {
+export function overlayDrawModel(scene, { width, height, now = Date.now() }: any = {}) {
   const W = Math.max(1, Math.round(width || 1280));
   const H = Math.max(1, Math.round(height || 720));
   const definition = scene ? OVERLAY_DEFINITIONS[scene.type] : null;
@@ -495,6 +542,7 @@ export function overlayDrawModel(scene, { width, height }: any = {}) {
   return {
     type: scene.type,
     blocksProgram: Boolean(definition.blocksProgram),
-    ops: drawer(scene.payload || {}, W, H),
+    // The countdown a drawer shows is the one still left, so it ticks.
+    ops: drawer(scene.payload || {}, W, H, { countdownMs: remainingCountdownMs(scene, now) }),
   };
 }

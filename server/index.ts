@@ -6,7 +6,9 @@
  * ephemeral port.
  */
 
+import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -88,7 +90,16 @@ export function createServer(options: any = {}) {
     res.status(404).json({ error: `no route for ${req.method} ${req.path}` });
   });
 
-  const server = http.createServer(app);
+  // HTTPS when a certificate is configured: a browser only gives a page the
+  // camera and the microphone on a secure origin (or localhost), so serving over
+  // TLS is what makes the studio usable from other machines.
+  const server =
+    config.tlsCert && config.tlsKey
+      ? https.createServer(
+          { cert: fs.readFileSync(config.tlsCert), key: fs.readFileSync(config.tlsKey) },
+          app,
+        )
+      : http.createServer(app);
   const signaling = new SignalingServer({ server, registry, config, logger, mailer, recordingStore });
 
   const listen = (port = config.port, host = config.host) =>
@@ -113,8 +124,18 @@ export function createServer(options: any = {}) {
 
 async function main() {
   const config = loadConfig();
+  // The server only ever serves the compiled client, so a missing build is the
+  // single most confusing failure mode ("nothing works"): say it out loud.
+  const indexFile = path.join(config.publicDir, 'index.html');
+  if (!fs.existsSync(indexFile)) {
+    console.warn(`  ! no client build found in ${config.publicDir}`);
+    console.warn('  ! run "npm run build" (or use npm start / npm run dev, which build first)');
+  }
   const quandrite = createServer({ config });
   quandrite.registry.startSweeper();
+  // Reap sockets that stopped answering: without a heartbeat a closed tab keeps
+  // its seat in the roster as a ghost member, and the room never looks right.
+  quandrite.signaling.startHeartbeat();
 
   const address = await quandrite.listen();
   const host = address.address === '::' || address.address === '0.0.0.0' ? 'localhost' : address.address;

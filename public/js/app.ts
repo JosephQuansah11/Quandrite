@@ -5,12 +5,15 @@
  * publisher and meeting mesh, and renders the studio controls.
  */
 
-import { $, el, clear, fmtDuration, fmtBytes, fmtTime, toast } from './dom.js';
+import { $, $$, el, clear, fmtDuration, fmtBytes, fmtTime, toast } from './dom.js';
 import { QuandriteSocket } from './ws.js';
 import { CameraManager } from './devices.js';
 import { ProgramCompositor } from './compositor.js';
 import { StreamPublisher } from './publisher.js';
 import { MeetingMesh } from './webrtc.js';
+import { MediaRelay } from './relay.js';
+import { gridColumnsFor } from '/shared/layout.js';
+import { formatCountdown, remainingCountdownMs } from '/shared/overlays.js';
 import { CLIENT, REQUESTABLE_SCENE_TYPES, SERVER, canControlBroadcast } from '/shared/protocol.js';
 import type {
   BreakoutCatalogue,
@@ -40,6 +43,8 @@ interface ClientState {
   members: Member[];
   sources: Source[];
   program: Program;
+  /** The room as the server describes it (name, host seat, password state). */
+  room: any;
   scene: RoomSnapshot['scene'];
   destinations: any[];
   stream: StreamSnapshot | any;
@@ -51,8 +56,18 @@ interface ClientState {
   breakouts: BreakoutCatalogue;
   breakoutId: string | null;
   peerStreams: Map<string, MediaStream>;
+  /** Every feed the room has sent, by MediaStream id, so sources can be matched. */
+  peerStreamIds: Map<string, { peerId: string; stream: MediaStream }>;
+  /** Relayed pictures (the socket fallback) by sender, when peer-to-peer fails. */
+  relayFrames: Map<string, { url: string; sourceId: string | null; kind: string; at: number }>;
+  /** The socket picture relay. */
+  relay: any;
+  /** The studio program feed received from the room's program owner. */
+  programStream: MediaStream | null;
   roomPeers: Map<string, string> | null;
   panes: Record<string, boolean>;
+  /** How the room is shown: slide, grid or list (null = pick by room size). */
+  peopleView: string | null;
   sceneForm: { type: string; screenKey?: string; music?: any };
   inCall: boolean;
   publishing: boolean;
@@ -77,6 +92,7 @@ const state: ClientState = {
   members: [],
   sources: [],
   program: { mode: 'single', sourceId: null, gridIds: [], onAir: [] },
+  room: null,
   scene: null,
   destinations: [],
   stream: { status: 'offline' },
@@ -87,8 +103,13 @@ const state: ClientState = {
   breakouts: { available: false, max: 8, active: false, endsAt: null, rooms: [] },
   breakoutId: null,
   peerStreams: new Map(),
+  peerStreamIds: new Map(),
+  relayFrames: new Map(),
+  relay: null,
+  programStream: null,
   roomPeers: null,
   panes: loadPanes(),
+  peopleView: loadPeopleView(),
   sceneForm: { type: 'title' },
   inCall: false,
   publishing: false,
@@ -114,10 +135,20 @@ function wsUrl() {
  * preview immediately instead of after a re-join.
  */
 const PANE_KEY = 'quandrite.panes';
-const PANES = ['program', 'participants', 'sources', 'sidebar'];
+const PANES = ['program', 'grid', 'participants', 'sources', 'sidebar'];
+/** How the room is shown, and the size above which a list is the only sane view. */
+const PEOPLE_VIEW_KEY = 'quandrite.peopleView';
+const PEOPLE_VIEWS = ['slide', 'grid', 'list'];
+const PEOPLE_LIST_LIMIT = 50;
+/** Where we remember that the host chose to set the room password later. */
+const PASSWORD_PROMPT_KEY = 'quandrite.passwordPrompt';
+/** The one-second repaint that keeps a running countdown counting. */
+let sceneTicker: any = null;
+/** The password page is a one-shot on the way in, never a reconnect interrupt. */
+let passwordPageHandled = false;
 
 function loadPanes() {
-  const panes = { program: true, participants: true, sources: true, sidebar: true };
+  const panes = { program: true, grid: true, participants: true, sources: true, sidebar: true };
   try {
     const stored = JSON.parse(localStorage.getItem(PANE_KEY) || '{}');
     for (const pane of PANES) if (typeof stored[pane] === 'boolean') panes[pane] = stored[pane];
@@ -131,14 +162,26 @@ function loadPanes() {
 function applyPaneVisibility() {
   for (const pane of PANES) {
     const shown = state.panes[pane] !== false;
+    // A collapsed pane keeps its head - and its arrow - so it can be brought back
+    // without stealing space in the top bar.
     for (const node of document.querySelectorAll(`[data-pane="${pane}"]`)) {
-      node.classList.toggle('pane-hidden', !shown);
+      node.classList.toggle('pane-collapsed', !shown);
     }
-    const toggle = document.querySelector(`#pane-toggles button[data-pane="${pane}"]`);
-    if (toggle) toggle.setAttribute('aria-pressed', shown ? 'true' : 'false');
+    const horizontal = pane === 'sidebar';
+    for (const button of document.querySelectorAll(`button.pane-toggle[data-pane="${pane}"]`)) {
+      button.setAttribute('aria-pressed', shown ? 'true' : 'false');
+      // A real chevron: pointing down while the pane is open, sideways once it is
+      // collapsed and only its head is left.
+      button.innerHTML = icon(shown ? (horizontal ? 'chevronLeft' : 'chevronDown') : 'chevronRight');
+      button.title = shown
+        ? `Collapse this pane (${horizontal ? 'to the side' : 'down'})`
+        : 'Expand this pane';
+    }
   }
   const layout = document.querySelector('main.layout');
-  if (layout) layout.classList.toggle('sidebar-hidden', state.panes.sidebar === false);
+  if (layout) layout.classList.toggle('sidebar-collapsed', state.panes.sidebar === false);
+  // A pane that was just un-hidden has to be painted on the spot.
+  renderGridPreview();
 }
 
 function setPane(pane, shown) {
@@ -156,6 +199,39 @@ function togglePane(pane) {
   setPane(pane, state.panes[pane] === false);
 }
 
+/** The view the user picked, remembered like the panes are. */
+function loadPeopleView() {
+  try {
+    const value = localStorage.getItem(PEOPLE_VIEW_KEY);
+    return PEOPLE_VIEWS.includes(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How the people in the room are shown.
+ *
+ * A big room (more than {@link PEOPLE_LIST_LIMIT}) is a list with everyone's
+ * controls - slides and grids stop being readable - while a smaller room slides
+ * by default and can be switched to a grid.
+ */
+function peopleViewFor(count) {
+  if (state.peopleView) return state.peopleView;
+  return count > PEOPLE_LIST_LIMIT ? 'list' : 'slide';
+}
+
+function setPeopleView(view) {
+  if (!PEOPLE_VIEWS.includes(view)) return;
+  state.peopleView = view;
+  try {
+    localStorage.setItem(PEOPLE_VIEW_KEY, view);
+  } catch {
+    // private mode: the choice simply does not persist
+  }
+  renderParticipants();
+}
+
 /** The camera I have published into the studio, if any. */
 function myCameraSource() {
   return state.camera.list().find((source) => source.kind === 'camera') || null;
@@ -167,15 +243,27 @@ function setLocalAudio(enabled) {
     for (const track of source.stream?.getAudioTracks?.() || []) track.enabled = enabled;
   }
   state.meeting.setMicEnabled(enabled);
+  // A microphone that has just been switched on must be heard by the room at
+  // once, even when it is the only thing I have published.
+  if (enabled) {
+    const stream = localMediaStream();
+    if (stream) publishToRoom(stream).catch(() => {});
+  }
   const button = $('#btn-toggle-mic');
-  if (button) button.textContent = enabled ? 'Mute' : 'Unmute';
+  if (button) iconLabel(button, enabled ? 'mic' : 'micOff', enabled ? 'Mute' : 'Unmute');
 }
 
 function syncCompositorSources() {
   const local = new Map(state.camera.list().map((source) => [source.id, source]));
   state.compositor.setSources(
     state.sources.map((source) => {
-      const media = local.get(source.id);
+      // My own captures are keyed by source id; someone else's media arrives
+      // through the room mesh, so it is matched by owner (and, once the sharer
+      // has announced it, by the stream they published it with).
+      const media =
+        local.get(source.id) ||
+        local.get(`stream:${source.meta?.streamId}`) ||
+        local.get(`participant:${source.ownerId}`);
       return {
         ...source,
         stream: media?.stream || null,
@@ -184,6 +272,24 @@ function syncCompositorSources() {
       };
     }),
   );
+  // The outgoing video follows the program: a single camera or screen goes out as
+  // its own real track, the canvas only carries what has to be composited.
+  refreshProgramVideo();
+}
+
+/**
+ * Keep the encoder on the real on-air video.
+ *
+ * A live broadcast that switches camera (or goes to the grid, or puts an overlay
+ * up) needs the encoder to follow, and the encoder is bound to the tracks it
+ * started with - so the publisher rebuilds the recorder for the new source.
+ */
+function refreshProgramVideo() {
+  try {
+    state.publisher?.syncVideoTrack?.();
+  } catch {
+    // nothing is live: nothing to re-point
+  }
 }
 
 /** My location: a breakout room id, or the main room when it is null. */
@@ -206,8 +312,220 @@ function meetingPeerIds() {
   return state.members.filter((member) => roomKeyOf(member) === mine).map((member) => member.id);
 }
 
+/**
+ * The stream the room should see and hear from me: my camera, my screen, or just
+ * my microphone. Publishing any of them is what puts me in the mesh.
+ */
+function localMediaStream() {
+  const sources = state.camera.list();
+  const visual = sources.find(
+    (entry) => (entry.kind === 'camera' || entry.kind === 'screen') && entry.stream,
+  );
+  if (visual?.stream) return visual.stream;
+  // A microphone on its own is enough: "unmute me" has to be heard.
+  return sources.find((entry) => entry.stream?.getAudioTracks?.().length)?.stream || null;
+}
+
+/** The microphone I publish, added on demand the first time I speak. */
+async function ensureMicrophone() {
+  const existing = state.camera.list().find((entry) => entry.stream?.getAudioTracks?.().length);
+  if (existing) return existing;
+  return state.camera.addMicrophone({});
+}
+
+/**
+ * Start (or keep) the room mesh.
+ *
+ * Turning a camera or a screen on is enough to publish it: nobody has to press
+ * "Join call" first, so a viewer's video reaches the whole room the moment it
+ * exists. Joining with no media yet is fine too - the connections are cheap and
+ * the first track turns them into a picture.
+ */
+async function ensureMesh() {
+  if (!state.roomId || !state.clientId) return false;
+  if (!state.meeting.active) {
+    await state.meeting.join(localMediaStream(), meetingPeerIds());
+    return true;
+  }
+  state.meeting.sync(meetingPeerIds());
+  return true;
+}
+
+/** Keep the mesh in step with the room I am in. */
 function syncMeetingPeers() {
-  if (state.inCall) state.meeting.sync(meetingPeerIds());
+  if (!state.roomId) return;
+  ensureMesh().catch(() => {});
+}
+
+/**
+ * Is the socket picture relay needed?
+ *
+ * Peer-to-peer is always tried first - it is faster and costs the server nothing -
+ * so the relay only starts when a connection exists but is not connected: that is
+ * exactly the case where two networks will not let the browsers reach each other.
+ */
+function relayFallbackNeeded() {
+  if (!state.roomId || !state.meeting?.active) return false;
+  const peers = [...(state.meeting.peers?.values?.() || [])];
+  if (!peers.length) return false;
+  return peers.some((peer) => peer.pc?.connectionState !== 'connected');
+}
+
+/**
+ * Start, refresh or stop the socket relay to match what I publish and whether the
+ * peer connections are actually carrying it.
+ */
+function syncRelay() {
+  if (!state.relay) return;
+  if (!relayFallbackNeeded()) {
+    if (state.relay.publishing) state.relay.stop();
+    return;
+  }
+  for (const source of state.camera.list()) {
+    if (source.kind !== 'camera' && source.kind !== 'screen') continue;
+    if (!source.stream) continue;
+    state.relay.add({ id: source.id, kind: source.kind, label: source.label, stream: source.stream });
+  }
+  // Forget the ones that are gone (a camera that was switched off).
+  for (const id of state.relay.ids) {
+    if (!state.camera.get(id)) state.relay.remove(id);
+  }
+}
+
+/**
+ * A picture that arrived over the socket: show it where the live feed would have
+ * gone, and hand it to the camera manager so it can be composited too.
+ */
+function renderRelayedFrame(header, payload) {
+  const from = header?.from;
+  if (!from) return;
+  const url = URL.createObjectURL(new Blob([payload], { type: 'image/jpeg' }));
+  const previous = state.relayFrames.get(from);
+  if (previous?.url) URL.revokeObjectURL(previous.url);
+  state.relayFrames.set(from, {
+    url,
+    sourceId: header.sourceId || null,
+    kind: header.kind || 'camera',
+    at: Date.now(),
+  });
+  showRelayedPicture(from, url);
+  if (header.sourceId) {
+    state.camera
+      .attachRemoteImage({
+        id: header.sourceId,
+        label: header.label || `${header.fromName || 'Guest'}'s picture`,
+        peerId: from,
+        url,
+        kind: header.kind === 'screen' ? 'screen' : 'virtual',
+      })
+      ?.video &&
+      syncCompositorSources();
+    renderGridPreview();
+  }
+}
+
+/** Put a relayed picture on a peer's tile without rebuilding the whole room. */
+function showRelayedPicture(peerId, url) {
+  const tile = document.querySelector(`#participant-strip [data-peer="${peerId}"]`);
+  if (!tile) {
+    renderParticipants();
+    return;
+  }
+  let picture = tile.querySelector('img.tile-picture');
+  if (!picture) {
+    picture = el('img', { class: 'tile-picture', alt: '' });
+    tile.querySelector('video')?.remove();
+    tile.prepend(picture);
+  }
+  picture.src = url;
+  tile.classList.add('live');
+}
+
+/**
+ * Put a freshly captured stream in front of the room: start the mesh if this is
+ * the first media I have, then hand every track to each peer.
+ */
+async function publishToRoom(stream) {
+  if (!stream) return false;
+  await ensureMesh();
+  if (!state.meeting.active) return false;
+  state.meeting.setCameraEnabled(true);
+  for (const track of stream.getTracks?.() || []) state.meeting.attachTrack(track, stream);
+  return true;
+}
+
+/** Who owns the program picture: the host runs the studio, everyone else watches. */
+function programOwnerId() {
+  const host = state.members.find((member) => member.role === 'host');
+  return host?.id || null;
+}
+
+function iOwnProgram() {
+  return Boolean(state.clientId) && programOwnerId() === state.clientId;
+}
+
+/**
+ * Send the studio program to the room, or stop sending it.
+ *
+ * The owner is the host: their compositor is the picture and the mix the room
+ * should see. Everyone else receives it over WebRTC, so the program arrives in
+ * tens of milliseconds instead of queueing behind the RTMP relay. The feed goes
+ * to the whole studio, because a breakout still watches the parent's program.
+ */
+function syncProgramFeed() {
+  const stream = state.roomId && iOwnProgram() ? state.compositor.programStream() : null;
+  state.meeting.setProgramStream(stream, state.members.map((member) => member.id));
+  // The owner watches its own canvas, never its own feed.
+  if (stream) state.programStream = null;
+  renderProgramFeed();
+}
+
+/**
+ * Does the program's audio take over this client?
+ *
+ * In the main room, yes: that is the sound everyone came for, and the meeting
+ * tiles go quiet so a voice never arrives twice. In a breakout the room's own
+ * conversation wins - the program picture is there, its audio is not.
+ */
+function programAudioTakesOver() {
+  return Boolean(state.programStream) && !state.breakoutId;
+}
+
+/**
+ * Show the program feed received from the room's owner.
+ *
+ * The local canvas keeps drawing the owner's own picture; for everyone else the
+ * incoming feed sits on top of it, because that is the real program - overlays,
+ * badges, countdowns and all.
+ */
+function renderProgramFeed() {
+  const node = $('#program-feed');
+  if (!node) return;
+  const pill = $('#program-feed-pill');
+  const stream = state.programStream;
+  if (!stream) {
+    if (node.srcObject) node.srcObject = null;
+    node.classList.add('hidden');
+    pill?.classList.add('hidden');
+    applyProgramAudioPolicy();
+    return;
+  }
+  if (node.srcObject !== stream) node.srcObject = stream;
+  // A breakout keeps its own conversation; only the main room hears the mix.
+  node.muted = Boolean(state.breakoutId);
+  node.classList.remove('hidden');
+  pill?.classList.remove('hidden');
+  if (typeof node.play === 'function') node.play().catch(() => {});
+  applyProgramAudioPolicy();
+}
+
+/**
+ * The program mix already contains the room, so the meeting tiles go quiet while
+ * the program feed is playing here - otherwise every voice arrives twice.
+ */
+function applyProgramAudioPolicy() {
+  const quiet = programAudioTakesOver();
+  for (const video of $$('#remote-grid video')) video.muted = quiet;
 }
 
 function breakoutLabel(breakoutId) {
@@ -300,12 +618,12 @@ function myTileActions() {
 function updateMyTileActions(tile, member) {
   const mic = tile.querySelector('[data-tile="mic"]');
   if (!mic) return;
-  mic.textContent = member.muted ? '\u{1F507} Unmute' : '\u{1F3A4} Mute';
+  iconLabel(mic, member.muted ? 'micOff' : 'mic', member.muted ? 'Unmute' : 'Mute');
   mic.title = member.muted ? 'Turn your microphone on' : 'Mute your microphone';
   mic.classList.toggle('ghost', member.muted);
 
   const camera = tile.querySelector('[data-tile="camera"]');
-  camera.textContent = member.cameraEnabled ? '\u{1F4F9} Stop video' : '\u{1F4F7} Start video';
+  iconLabel(camera, member.cameraEnabled ? 'camera' : 'cameraOff', member.cameraEnabled ? 'Stop video' : 'Start video');
   camera.title = member.cameraEnabled ? 'Stop publishing your camera' : 'Publish your camera';
   camera.classList.toggle('ghost', !member.cameraEnabled);
 
@@ -327,6 +645,14 @@ function renderParticipants() {
   if (!strip) return;
   const members = roomMembers();
 
+  // How the room is shown: a slide, a grid, or - in a big room - a list that
+  // still carries everyone's controls.
+  const view = peopleViewFor(members.length);
+  strip.className = `participant-strip ${view}`;
+  for (const button of $$('#people-view button')) {
+    button.classList.toggle('active', button.dataset.view === view);
+  }
+
   const label = $('#participant-room-label');
   if (label) label.textContent = state.breakoutId ? breakoutLabel(state.breakoutId) : 'main room';
   const count = $('#participant-count');
@@ -341,8 +667,12 @@ function renderParticipants() {
   for (const member of members) {
     seen.add(member.id);
     const isMe = member.id === state.clientId;
-    // My own video comes from my camera, everyone else's from the call mesh.
-    const stream = state.peerStreams.get(member.id) || (isMe ? state.camera.primaryStream() : null);
+    // My own video comes from my camera, everyone else's from the room mesh. A
+    // camera that has been switched off shows the avatar again, even though the
+    // peer connection is still up.
+    const stream = member.cameraEnabled
+      ? state.peerStreams.get(member.id) || (isMe ? state.camera.primaryStream() : null)
+      : null;
 
     let tile = strip.querySelector(`[data-peer="${member.id}"]`);
     if (!tile) {
@@ -370,10 +700,31 @@ function renderParticipants() {
       tile.classList.remove('live');
     }
 
+    // No live feed? A relayed picture (the socket fallback) stands in for it, so
+    // a camera or screen still shows up when the networks refuse peer-to-peer.
+    const frame = state.relayFrames.get(member.id);
+    // A relayed picture is proof they are publishing, even before the member's
+    // own "camera on" reaches us.
+    const picture = !stream && (member.cameraEnabled || frame) ? frame?.url || null : null;
+    let image = tile.querySelector('img.tile-picture');
+    if (picture && !image) {
+      image = el('img', { class: 'tile-picture', alt: '' });
+      tile.prepend(image);
+      tile.classList.add('live');
+    }
+    if (image) {
+      if (picture) image.src = picture;
+      else {
+        image.remove();
+        tile.classList.toggle('live', Boolean(stream));
+      }
+    }
+
     tile.querySelector('.avatar').textContent = initials(member.name);
     const name = tile.querySelector('.name');
-    name.textContent = `${member.name}${isMe ? ' (you)' : ''} `;
-    name.append(el('span', { class: `role-badge role-${member.role}`, text: roleLabel(member.role) }));
+    // The dot carries the role; the word is only in the top bar.
+    name.textContent = '';
+    name.append(roleDot(member.role), `${member.name}${isMe ? ' (you)' : ''}`);
     tile.querySelector('.sub').textContent = [
       member.muted ? 'muted' : 'mic on',
       member.cameraEnabled ? 'camera on' : 'camera off',
@@ -401,8 +752,14 @@ function boot() {
   state.compositor = new ProgramCompositor({ canvas: $('#program-canvas') });
   state.publisher = new StreamPublisher({ socket: state.socket, compositor: state.compositor });
   state.meeting = new MeetingMesh({ socket: state.socket });
+  // The socket picture relay: the fallback for cameras and screens when two
+  // networks will not let the browsers reach each other.
+  state.relay = new MediaRelay({ socket: state.socket });
 
   state.compositor.start();
+
+  // Peer-to-peer first; a picture relay only while a connection is not connected.
+  setInterval(syncRelay, 4000);
 
   wireSocket();
   wireCamera();
@@ -412,8 +769,13 @@ function boot() {
 
   state.socket.connect();
 
-  // Audio contexts need a user gesture; resume on the first interaction.
-  const resumeAudio = () => state.compositor.resumeAudio();
+  // Audio contexts and the program feed both need a user gesture; resume on the
+  // first interaction so the room hears the program straight away.
+  const resumeAudio = () => {
+    state.compositor.resumeAudio();
+    const feed = $('#program-feed');
+    if (feed?.srcObject && typeof feed.play === 'function') feed.play().catch(() => {});
+  };
   document.addEventListener('pointerdown', resumeAudio, { once: true });
   document.addEventListener('keydown', resumeAudio, { once: true });
 
@@ -424,6 +786,9 @@ function boot() {
   // Nothing can be published before joining a room.
   updateControlAvailability();
   applyPaneVisibility();
+  updateJoinControls();
+  // The socket is connecting now: say so, with a way to retry by hand.
+  showConnectionBanner('Connecting to the studio server...');
   // Before joining there are no studio controls, so open on the roster.
   if (!hasControl()) activateTab('people');
 }
@@ -433,6 +798,7 @@ function wireSocket() {
 
   socket.on('open', () => {
     setPill('#connection-pill', 'online', 'online');
+    hideConnectionBanner();
     // A dropped connection re-joins the room on its own: no page refresh.
     if (state.reconnecting && state.join) rejoinRoom();
   });
@@ -440,6 +806,17 @@ function wireSocket() {
   socket.on('close', () => {
     setPill('#connection-pill', 'offline', 'reconnecting');
     if (state.roomId) state.reconnecting = true;
+    // Say it out loud, with a way out: a dropped socket must never look like a
+    // dead app, and the room is kept so re-joining costs one click.
+    showConnectionBanner(
+      state.roomId
+        ? 'Connection lost - retrying. Your room and your seat are kept; press Retry now to reconnect at once.'
+        : 'Connection lost - retrying. Press Retry now to reconnect at once.',
+    );
+  });
+
+  socket.on('socket-error', () => {
+    showConnectionBanner('Could not reach the studio server. Is it running? Press Retry now.');
   });
 
   socket.on(SERVER.WELCOME, (message) => {
@@ -447,6 +824,11 @@ function wireSocket() {
     state.overlayDefinitions = message.overlayDefinitions || {};
     state.platforms = message.platforms || [];
     state.mail = message.mail || { enabled: false, from: null };
+    // STUN/TURN from the server: without a relay a call only works when both
+    // sides can reach each other directly.
+    if (Array.isArray(message.iceServers) && message.iceServers.length) {
+      state.meeting.setIceServers(message.iceServers);
+    }
     renderSceneButtons();
     renderPlatformOptions();
     renderCredentials();
@@ -454,13 +836,20 @@ function wireSocket() {
 
   socket.on(SERVER.CHAT_NEW, (message) => appendChat(message));
 
+  // A picture relayed over the socket (the peer-to-peer fallback).
+  socket.on('media:frame', ({ header, payload }) => renderRelayedFrame(header, payload));
+
   socket.on(SERVER.MEMBERS_UPDATE, (members) => {
     state.members = members;
     const me = members.find((member) => member.id === state.clientId);
     if (me) {
+      const wasHost = isHost();
       state.role = me.role;
       setPill('#role-pill', `role-${me.role}`, me.role);
       updateControlAvailability();
+      // Being handed the seat mid-session never interrupts with the password page:
+      // the People tab offers it there.
+      if (!wasHost && me.role === 'host') renderCredentials();
     }
     renderMembers();
     renderPeople();
@@ -468,6 +857,8 @@ function wireSocket() {
     trackRoomPeers(members, { announce: true });
     renderParticipants();
     syncMeetingPeers();
+    // The host seat can move: the program owner follows it.
+    syncProgramFeed();
   });
 
   socket.on(SERVER.BREAKOUTS_UPDATE, (breakouts) => {
@@ -489,6 +880,8 @@ function wireSocket() {
     trackRoomPeers(state.members, { announce: false });
     renderParticipants();
     syncMeetingPeers();
+    // Moving rooms changes the meeting mesh and whether the program is audible.
+    syncProgramFeed();
     toast(
       state.breakoutId
         ? `You are in ${breakoutLabel(state.breakoutId)}`
@@ -516,12 +909,17 @@ function wireSocket() {
     syncCompositorSources();
     renderProgramControls();
     renderSources();
+    // The grid preview follows the program the studio just published.
+    renderGridPreview();
   });
 
   socket.on(SERVER.SCENE_UPDATE, (scene) => {
     state.scene = scene;
     state.compositor.setScene(scene);
     renderSceneCurrent();
+    // An overlay (or its end) changes what has to be composited, so the outgoing
+    // video may go back to the real camera track - or need the canvas again.
+    refreshProgramVideo();
   });
 
   socket.on(SERVER.DESTINATIONS_UPDATE, (destinations) => {
@@ -580,6 +978,32 @@ function setPill(selector, className, text) {
   node.textContent = text;
 }
 
+// ------------------------------------------------------------ connection state
+
+/** A visible, actionable line about the socket - never a silent dead page. */
+function showConnectionBanner(text) {
+  const banner = $('#connection-banner');
+  if (!banner) return;
+  const label = $('#connection-banner-text');
+  if (label && text) label.textContent = text;
+  banner.classList.remove('hidden');
+}
+
+function hideConnectionBanner() {
+  $('#connection-banner')?.classList.add('hidden');
+}
+
+/**
+ * Retry the socket by hand. If we already have a room, the re-join happens as
+ * soon as the socket opens again, so one click is enough.
+ */
+function retryConnection() {
+  showConnectionBanner('Reconnecting to the studio server...');
+  if (state.roomId) state.reconnecting = true;
+  if (state.socket.connected && state.join) rejoinRoom();
+  else state.socket.connect();
+}
+
 // --------------------------------------------------------------- join & room
 
 async function joinRoom({ name, roomId, role, password, silent = false }) {
@@ -597,12 +1021,137 @@ async function joinRoom({ name, roomId, role, password, silent = false }) {
   applySnapshot(result.snapshot);
   setPill('#role-pill', `role-${result.role}`, result.role);
   setPill('#connection-pill', 'online', 'online');
+  // The room mesh and the program feed follow the room, not a button press.
+  await ensureMesh().catch(() => {});
+  syncProgramFeed();
   if (!silent) toast(`Joined ${result.roomId} as ${result.role}`, 'ok');
+  // A brand new room has no password: the host gets the password page, once, on
+  // the way in. A silent re-join (a reconnect) never interrupts with it.
+  passwordPageHandled = Boolean(silent);
+  try {
+    updateControlAvailability();
+    renderCredentials();
+    if (isHost() && roomNeedsHostPassword() && !passwordPageHandled && !passwordPromptedLater()) {
+      showPasswordPage();
+    } else {
+      updateJoinControls();
+    }
+    // Hosts and co-hosts land on the studio controls; watchers land on the roster.
+    activateTab(hasControl() ? 'scenes' : 'people');
+    loadRecordings();
+  } catch (error) {
+    // A rendering problem must never look like a failed join: the room is joined
+    // either way, so say what broke and keep the socket usable.
+    console.error('post-join render failed', error);
+    toast(`Joined, but part of the studio did not render: ${error.message}`, 'error');
+  }
+}
+
+/**
+ * Three screens, one at a time: the landing page before a room, the password page
+ * while a brand new host protects the seat, and the studio itself.
+ */
+function updateJoinControls() {
+  const inRoom = Boolean(state.roomId);
+  const needsPassword = inRoom && !passwordPageHandled && roomNeedsHostPassword() && !passwordPromptedLater();
+  const landing = $('#landing');
+  if (landing) landing.classList.toggle('hidden', inRoom);
+  const passwordPage = $('#password-page');
+  if (passwordPage) passwordPage.classList.toggle('hidden', !needsPassword);
+  const studio = $('#studio');
+  if (studio) studio.classList.toggle('hidden', !inRoom || needsPassword);
+  const leave = $('#btn-leave-room');
+  if (leave) leave.classList.toggle('hidden', !inRoom);
+  // Sharing is a room action: anyone in the room can publish their camera or
+  // screen, and the host can place what arrives.
+  const share = $('#btn-share');
+  if (share) share.classList.toggle('hidden', !inRoom || needsPassword);
+  const join = $('#btn-join');
+  if (join) join.textContent = inRoom ? 'Rejoin' : 'Join';
+  renderIdentity();
+}
+
+/** My name and my room, in the top bar. */
+function renderIdentity() {
+  const name = $('#name-pill');
+  if (name) name.textContent = state.name || 'not joined';
+  const room = $('#room-pill');
+  if (room) room.textContent = state.roomId ? `room ${state.roomId}` : 'no room';
+}
+
+/** Leave the room without reloading, so another room can be joined at once. */
+async function leaveRoom() {
+  if (!state.roomId) return;
+  // Take my own cameras and microphones out of the studio first: after leaving
+  // the room the server would refuse the removal.
+  for (const source of state.camera.list()) {
+    if (source.kind !== 'virtual') await state.camera.removeSource(source.id).catch(() => {});
+  }
+  try {
+    await state.socket.send(CLIENT.LEAVE);
+  } catch {
+    // Leaving locally is still the right thing to do.
+  }
+  resetClientRoom();
+  toast('Left the room', 'ok');
+}
+
+/** Back to the pre-join state, so the join bar is ready for the next room. */
+function resetClientRoom() {
+  state.roomId = null;
+  state.role = 'viewer';
+  state.clientId = null;
+  state.credentials = null;
+  state.breakoutId = null;
+  state.join = null;
+  state.reconnecting = false;
+  state.members = [];
+  state.sources = [];
+  state.program = { mode: 'single', sourceId: null, gridIds: [], onAir: [], updatedAt: Date.now() };
+  state.room = null;
+  state.scene = null;
+  state.stream = { status: 'offline' };
+  state.recording = { status: 'idle' };
+  state.roomPeers = null;
+  state.inCall = false;
+  // Back to the landing page: the password page is offered again next time.
+  passwordPageHandled = false;
+  state.programStream = null;
+  state.peerStreams.clear();
+  state.peerStreamIds.clear();
+  state.meeting.leave().catch(() => {});
+  state.meeting.setProgramStream(null);
+  state.breakouts = {
+    available: false,
+    max: 8,
+    active: false,
+    startedAt: null,
+    endsAt: null,
+    durationMs: 0,
+    rooms: [],
+  };
+
+  state.compositor.setProgram(state.program);
+  state.compositor.setScene(null);
+  syncCompositorSources();
+  clear($('#chat-log'));
+  setPill('#role-pill', '', 'guest');
+  setPill('#breakout-pill', 'hidden', 'main room');
   updateControlAvailability();
+  updateJoinControls();
+  renderMembers();
+  renderPeople();
+  renderSources();
+  renderParticipants();
+  renderBreakouts();
   renderCredentials();
-  // Hosts and co-hosts land on the studio controls; watchers land on the roster.
-  activateTab(hasControl() ? 'scenes' : 'people');
-  loadRecordings();
+  renderDestinations();
+  renderStreamStatus();
+  renderSceneCurrent();
+  renderProgramControls();
+  clear($('#remote-grid'));
+  renderProgramFeed();
+  activateTab('people');
 }
 
 /** Re-join after a dropped connection, so a blip never needs a page refresh. */
@@ -622,6 +1171,7 @@ function applySnapshot(snapshot, { roster = true }: any = {}) {
   if (!snapshot) return;
   // The roster belongs to the parent room: a breakout move keeps it as it is.
   if (roster) state.members = snapshot.members || [];
+  state.room = snapshot.room || state.room;
   state.sources = snapshot.sources || [];
   state.program = snapshot.program || state.program;
   state.scene = snapshot.scene || null;
@@ -692,6 +1242,52 @@ function roleLabel(role) {
 }
 
 /**
+ * Inline icons, drawn in the button's own colour.
+ *
+ * Emoji render differently on every platform (and cannot be recoloured), so the
+ * microphone, camera and the pane arrows are proper vector icons.
+ */
+const ICONS = {
+  mic: '<path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18.5V21"/><path d="M8.5 21h7"/>',
+  micOff:
+    '<path d="M9 9.5V6a3 3 0 0 1 5.6-1.5"/><path d="M15 11.5V12a3 3 0 0 1-4.4 2.6"/><path d="M19 11a7 7 0 0 1-10.6 6"/><path d="M12 18.5V21"/><path d="M8.5 21h7"/><path d="M3.5 3.5l17 17"/>',
+  camera: '<path d="M3 7.5h10.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3z"/><path d="M15.5 11.2 21 8v8l-5.5-3.2z"/>',
+  cameraOff:
+    '<path d="M3 7.5h8"/><path d="M15.5 11.2 21 8v8l-3-1.7"/><path d="M3.5 3.5l17 17"/>',
+  screen: '<path d="M3 5h18v11H3z"/><path d="M8 20h8"/><path d="M12 16v4"/>',
+  chevronDown: '<path d="M6 9.5l6 6 6-6"/>',
+  chevronRight: '<path d="M9.5 6l6 6-6 6"/>',
+  chevronLeft: '<path d="M14.5 6l-6 6 6 6"/>',
+};
+
+/** @returns {string} an inline SVG for one of {@link ICONS}. */
+function icon(name, { size = 14 }: any = {}) {
+  const body = ICONS[name] || '';
+  return `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+}
+
+/** Icon + label for a button that changes with the media state. */
+function iconLabel(button, name, label) {
+  if (!button) return;
+  button.innerHTML = `${icon(name)}<span>${label}</span>`;
+}
+
+/**
+ * Who is who at a glance: a coloured dot next to the name.
+ *
+ * Cyan is the host, purple is a co-host, and green is everybody who is watching
+ * (viewers and visitors).
+ */
+function roleDot(role) {
+  const label = roleLabel(role);
+  return el('span', {
+    class: `role-dot role-${role || 'viewer'}`,
+    title: `role: ${label}`,
+    'aria-label': `role: ${label}`,
+  });
+}
+
+/**
  * The People tab: everyone in the room (host, co-hosts, viewers and visitors)
  * with the role controls only the host is allowed to use.
  */
@@ -743,8 +1339,9 @@ function renderPeople() {
         el('div', { class: 'person-avatar', text: initials(member.name) }),
         el('div', { class: 'grow' }, [
           el('div', { class: 'title' }, [
+            // Role is the dot; the word stays in the top bar only.
+            roleDot(member.role),
             `${member.name}${isMe ? ' (you)' : ''}`,
-            el('span', { class: `role-badge role-${member.role}`, text: roleLabel(member.role) }),
             (state.breakouts.rooms || []).length
               ? el('span', {
                   class: `role-badge location${inBreakout ? ' in-breakout' : ''}`,
@@ -784,12 +1381,12 @@ function mediaButton(member, kind) {
   const isMe = member.id === state.clientId;
   const on = kind === 'mic' ? !member.muted : member.cameraEnabled;
   const action = kind === 'mic' ? (on ? 'Mute' : 'Unmute') : on ? 'Stop video' : 'Start video';
-  const icon = kind === 'mic' ? (on ? '\u{1F3A4}' : '\u{1F507}') : on ? '\u{1F4F9}' : '\u{1F4F7}';
+  const name = kind === 'mic' ? (on ? 'mic' : 'micOff') : on ? 'camera' : 'cameraOff';
 
   if (!isMe && !hasControl()) {
     return el('span', {
       class: `media-state ${on ? 'on' : 'off'}`,
-      text: `${icon} ${on ? 'on' : 'off'}`,
+      html: `${icon(name, { size: 13 })}<span>${on ? 'on' : 'off'}</span>`,
       title: `${member.name} \u00b7 ${on ? 'on' : 'off'}`,
     });
   }
@@ -798,7 +1395,7 @@ function mediaButton(member, kind) {
     class: `tiny ${on ? '' : 'ghost'}`,
     dataset: { media: kind, member: member.id },
     title: `${action}${isMe ? ' (you)' : ` ${member.name}`}`,
-    text: `${icon} ${action}`,
+    html: `${icon(name)}<span>${action}</span>`,
     onclick: () =>
       isMe
         ? toggleMyMedia(kind)
@@ -858,6 +1455,103 @@ function roleButton(text, role, member) {
   });
 }
 
+/**
+ * A readable, memorable suggestion. The server generates its own passwords when
+ * it creates a room; this is only what we offer the host in the dialog.
+ */
+function suggestPassword() {
+  const words = [
+    'amber', 'cedar', 'delta', 'ember', 'flint', 'garnet', 'harbor', 'indigo',
+    'juniper', 'kelp', 'lumen', 'marble', 'nectar', 'onyx', 'pepper', 'quartz',
+    'raven', 'sable', 'timber', 'umber', 'violet', 'willow', 'zephyr',
+  ];
+  const pick = () => words[Math.floor(Math.random() * words.length)];
+  return `${pick()}-${pick()}-${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
+/** True while the host seat can still be taken by anyone who asks for it. */
+function roomNeedsHostPassword() {
+  return Boolean(isHost() && state.roomId && state.room?.requiresHostPassword === false);
+}
+
+/**
+ * The password page.
+ *
+ * A brand new host protects the seat on its own page, between the join form and
+ * the studio: joining gets you in, this page decides whether the seat is guarded,
+ * and then you land in the room. Skipping is fine - the *People* tab offers the
+ * same thing inside the room, where the host can change it at any time.
+ */
+function showPasswordPage() {
+  const suggested = suggestPassword();
+  const suggestedField = $('#password-suggested');
+  if (suggestedField) suggestedField.value = suggested;
+  const hostField = $('#password-host');
+  if (hostField) hostField.value = suggested;
+  const cohostField = $('#password-cohost');
+  if (cohostField) cohostField.value = '';
+  const status = $('#password-status');
+  if (status) {
+    status.textContent =
+      'Anyone with the co-host password can claim that role themselves; leave it empty to keep it as it is.';
+  }
+  updateJoinControls();
+}
+
+/** Enter the room without a password (it can still be set from the People tab). */
+function skipPasswordPage() {
+  rememberPasswordLater();
+  passwordPageHandled = true;
+  updateJoinControls();
+  toast('You can set the room password any time in the People tab', 'info');
+}
+
+/** Did the host already choose to deal with the password later, for this room? */
+function passwordPromptedLater() {
+  if (!state.roomId) return false;
+  try {
+    return localStorage.getItem(`${PASSWORD_PROMPT_KEY}.${state.roomId}`) === 'later';
+  } catch {
+    return false;
+  }
+}
+
+/** Remember, per room, that the host chose to set the room password later. */
+function rememberPasswordLater() {
+  if (!state.roomId) return;
+  try {
+    localStorage.setItem(`${PASSWORD_PROMPT_KEY}.${state.roomId}`, 'later');
+  } catch {
+    // private mode: the page simply comes back next time
+  }
+}
+
+/** Save the room passwords (host only) and refresh everything that shows them. */
+async function saveRoomPasswords({ hostPassword, cohostPassword }: any = {}) {
+  if (!isHost()) {
+    toast('Only the host can set the room passwords', 'error');
+    return null;
+  }
+  if (!hostPassword && !cohostPassword) {
+    toast('Type a password first', 'error');
+    return null;
+  }
+  const result = await send(CLIENT.ROOM_UPDATE, { hostPassword, cohostPassword });
+  if (result?.credentials) {
+    state.credentials = result.credentials;
+    // Saving a host password makes the seat password-protected from now on.
+    if (hostPassword && state.room) state.room.requiresHostPassword = true;
+    renderCredentials();
+    if (state.credentials.hostPassword) {
+      // The password page is done with either way; the studio takes over.
+      passwordPageHandled = true;
+      updateJoinControls();
+    }
+    toast('Room passwords saved', 'ok');
+  }
+  return result;
+}
+
 /** Show the host the room passwords so they can share them (never for others). */
 function renderCredentials() {
   const host = $('#credential-host');
@@ -870,10 +1564,21 @@ function renderCredentials() {
   if (mailRow) mailRow.classList.toggle('hidden', !state.mail?.enabled);
   const status = $('#credential-status');
   if (status) {
-    status.textContent = state.credentials
-      ? 'Only the host can see these. Share the co-host password so people can claim the role themselves.'
-      : 'Join as the host to see the room passwords.';
+    if (!state.credentials) {
+      status.textContent = 'Join as the host to see the room passwords.';
+    } else if (roomNeedsHostPassword()) {
+      // The one case that matters: the host seat is not protected by a password.
+      status.textContent =
+        'This room has no password yet - press Generate passwords, then Set the room password, so the host seat is not handed to whoever joins an empty room first.';
+    } else {
+      status.textContent =
+        'Only the host can see these. Share the co-host password so people can claim the role themselves.';
+    }
   }
+  const generate = $('#btn-generate-passwords');
+  if (generate) generate.classList.toggle('hidden', !isHost());
+  const save = $('#btn-save-passwords');
+  if (save) save.textContent = roomNeedsHostPassword() ? 'Set the room password' : 'Save passwords';
 }
 
 /** Mail the host password to an address the host controls. */
@@ -1040,6 +1745,10 @@ function activateTab(name) {
     renderPresetOptions();
   } else if (name === 'meeting') {
     renderMembers();
+  } else if (name === 'share') {
+    // Cameras & screens: what is published, what can be, and where it goes.
+    renderDeviceDialogActions();
+    renderDevicePicker().catch(() => {});
   } else if (name === 'recordings') {
     renderRecordings(state.recordings);
     loadRecordings();
@@ -1065,6 +1774,7 @@ function renderSources() {
   const localIds = new Set(state.camera.list().map((source) => source.id));
   const onAir = new Set(state.program.onAir || []);
   renderSourceRequests();
+  renderGridPreview();
 
   if (!state.sources.length) {
     grid.append(el('p', { class: 'muted', text: 'No sources yet.' }));
@@ -1146,6 +1856,106 @@ function renderSources() {
   }
 }
 
+/**
+ * The sources the grid would composite, in order - the same rule the server
+ * uses, so the preview matches the program picture.
+ */
+function gridPreviewSources() {
+  const byId = new Map(state.sources.map((source) => [source.id, source]));
+  const chosen = (state.program.gridIds || []).map((id) => byId.get(id)).filter(Boolean);
+  const list = chosen.length
+    ? chosen
+    : state.sources.filter(
+        (source) => source.kind === 'camera' || source.kind === 'screen' || source.kind === 'virtual',
+      );
+  return list.filter((source) => source.kind !== 'audio');
+}
+
+/**
+ * The grid preview: the multi-camera picture laid out exactly like the program
+ * grid, so the host and co-hosts can see the arrangement before it goes out.
+ *
+ * Host and co-host only - viewers and visitors get the program preview alone.
+ * Each tile carries a live picture (sharing the capture's stream) and clicking
+ * one puts that source on air.
+ */
+function renderGridPreview() {
+  const host = $('#grid-preview');
+  if (!host) return;
+  const panel = $('#grid-panel');
+  // Viewers have no grid preview, and a collapsed pane needs no work.
+  if (!hasControl() || panel?.classList.contains('pane-collapsed')) return;
+
+  const sources = gridPreviewSources();
+  const summary = $('#grid-preview-summary');
+  if (summary) {
+    summary.textContent = sources.length
+      ? `${sources.length} tile(s) \u00b7 ${
+          state.program.mode === 'grid' ? 'live on the grid' : 'not on the grid yet'
+        }`
+      : 'No cameras or screens yet.';
+  }
+  host.style.gridTemplateColumns = `repeat(${gridColumnsFor(sources.length)}, minmax(0, 1fr))`;
+
+  const onAir = new Set(state.program.onAir || []);
+  const seen = new Set();
+  for (const source of sources) {
+    seen.add(source.id);
+    let tile = host.querySelector(`[data-grid="${source.id}"]`);
+    if (!tile) {
+      tile = el('div', { class: 'grid-preview-tile', dataset: { grid: source.id } }, [
+        el('div', { class: 'grid-preview-bar' }),
+      ]);
+      host.append(tile);
+    }
+
+    // A second <video> sharing the stream: the source tile in the Cameras pane
+    // keeps the original element, so neither disturbs the other. My own captures
+    // come from the camera manager; a source published on someone else's machine
+    // shows that person's call video.
+    const stream =
+      state.camera?.get(source.id)?.stream || state.peerStreams.get(source.ownerId) || null;
+    let video = tile.querySelector('video');
+    if (stream && !video) {
+      video = el('video', { autoplay: true, playsInline: true, muted: true });
+      video.srcObject = stream;
+      tile.prepend(video);
+    } else if (stream && video && video.srcObject !== stream) {
+      video.srcObject = stream;
+    } else if (!stream && video) {
+      video.remove();
+      video = null;
+    }
+
+    const placeholder = tile.querySelector('.grid-preview-placeholder');
+    if (!stream && !placeholder) {
+      tile.prepend(
+        el('div', {
+          class: 'grid-preview-placeholder',
+          text: `${source.ownerName} \u00b7 ${sourceKindLabel(source.kind)}`,
+        }),
+      );
+    } else if (stream && placeholder) {
+      placeholder.remove();
+    }
+
+    const live = onAir.has(source.id);
+    const bar = tile.querySelector('.grid-preview-bar');
+    clear(bar);
+    bar.append(
+      el('span', { class: 'name', text: source.label }),
+      el('span', { class: live ? 'grid-live' : 'muted', text: live ? 'on air' : sourceKindLabel(source.kind) }),
+    );
+    tile.classList.toggle('on-air', live);
+    tile.title = `Put ${source.label} on air`;
+    tile.onclick = () => sendProgram({ mode: 'single', sourceId: source.id });
+  }
+
+  for (const tile of [...host.querySelectorAll('.grid-preview-tile')]) {
+    if (!seen.has(tile.dataset.grid)) tile.remove();
+  }
+}
+
 /** One line of requests with a one-click apply, for the host and co-hosts. */
 function renderSourceRequests() {
   const host = $('#source-requests');
@@ -1183,18 +1993,29 @@ function renderProgramControls() {
 
 function renderSceneCurrent() {
   const node = $('#scene-current');
+  if (sceneTicker) {
+    clearTimeout(sceneTicker);
+    sceneTicker = null;
+  }
   if (!state.scene) {
     node.textContent = 'No overlay on air.';
     node.className = 'scene-current muted';
     return;
   }
   const seconds = state.scene.persistent ? 'until cleared' : `${Math.round(state.scene.durationMs / 1000)}s`;
+  // A countdown has to be seen counting, so the line is repainted once a second
+  // while one is running - the picture does the same on the canvas.
+  const countdownMs = remainingCountdownMs(state.scene);
   const detail = Object.entries(state.scene.payload || {})
-    .filter(([, value]) => value !== '' && value !== null && value !== false)
+    .filter(([, value]) => value !== '' && value !== null && value !== false && value !== 0)
     .map(([key, value]) => `${key}: ${String(value).slice(0, 40)}`)
     .join(' \u00b7 ');
-  node.textContent = `${state.scene.type} (${seconds}) ${detail}`;
+  const head = countdownMs > 0
+    ? `${state.scene.type} (${seconds}) \u00b7 countdown ${formatCountdown(countdownMs)}`
+    : `${state.scene.type} (${seconds})`;
+  node.textContent = `${head} ${detail}`;
   node.className = 'scene-current';
+  if (countdownMs > 0) sceneTicker = setTimeout(renderSceneCurrent, 1000);
 }
 
 function renderDestinations() {
@@ -1336,6 +2157,12 @@ async function send(type, payload: any = {}) {
   try {
     return await state.socket.send(type, payload);
   } catch (error) {
+    // A socket that is down is the one error worth shouting about, and worth a
+    // way out: show the banner and try to bring the connection back.
+    if (/not connected/i.test(error.message)) {
+      showConnectionBanner('Not connected to the studio server - reconnecting...');
+      state.socket.connect();
+    }
     toast(error.message, 'error');
     return null;
   }
@@ -1397,19 +2224,37 @@ async function renderDevicePicker() {
   }
 }
 
-async function openDeviceDialog() {
-  const dialog = $('#device-dialog');
-  if (!dialog) return;
-  await renderDevicePicker();
-  if (typeof dialog.showModal === 'function') dialog.showModal();
-  else dialog.setAttribute('open', '');
+/**
+ * Open the Share tab.
+ *
+ * Cameras & screens live in a tab of the studio rather than in a dialog, so the
+ * room's Share button simply brings that tab forward - nothing covers the room.
+ */
+function openSharePanel() {
+  activateTab('share');
 }
 
+/** The Share tab's actions and hint follow the role. */
+function renderDeviceDialogActions() {
+  const control = hasControl();
+  const labels = control
+    ? { studio: 'Add to studio', grid: 'Add to grid', air: 'Put on air' }
+    : { studio: 'Publish to the room', grid: 'ask for grid', air: 'ask for air' };
+  for (const [mode, label] of Object.entries(labels)) {
+    const button = $(`#btn-devices-${mode}`);
+    if (button) button.textContent = label;
+  }
+  const hint = $('#share-status');
+  if (hint) {
+    hint.textContent = control
+      ? 'Tick what to publish, then choose where it goes: the studio, the grid, or straight on air.'
+      : 'Tick what to publish: everyone in the room sees and hears it, and the host can put it on the grid or on air.';
+  }
+}
+
+/** Kept for the wiring that used to close the picker; the Share tab needs none. */
 function closeDeviceDialog() {
-  const dialog = $('#device-dialog');
-  if (!dialog) return;
-  if (typeof dialog.close === 'function') dialog.close();
-  else dialog.removeAttribute('open');
+  return false;
 }
 
 /**
@@ -1420,7 +2265,7 @@ function closeDeviceDialog() {
  */
 async function addSelectedDevices(mode) {
   const picker = $('#device-list-picker');
-  const status = $('#device-dialog-status');
+  const status = $('#share-status');
   const ticked = [...picker.querySelectorAll('input[type="checkbox"]:checked')].map((input) =>
     input.value.split(':'),
   );
@@ -1459,10 +2304,21 @@ async function addSelectedDevices(mode) {
         }`
       : 'Nothing could be added.';
   }
+  // Tell the room the camera/microphone is on, or every other client keeps
+  // showing the avatar even though the media is flowing.
+  if (added.length) {
+    const patch: any = {};
+    if (added.some((source) => source.kind === 'camera' || source.kind === 'screen')) patch.cameraEnabled = true;
+    if (added.some((source) => source.stream?.getAudioTracks?.().length)) patch.muted = false;
+    if (Object.keys(patch).length) await send(CLIENT.MEMBER_UPDATE, { patch });
+  }
   await applyPlacement(mode, added);
   await renderDevicePicker();
-  // Close the pane so the result is visible on the program preview at once.
-  closeDeviceDialog();
+  // The pane stays open on purpose: the host works through several devices and
+  // placements in a row, so closing it after every click would be busywork.
+  if (status) {
+    status.textContent = `${status.textContent} Pick the next device, or press Close when you are done.`;
+  }
 }
 
 /** Put the freshly published sources in the studio, the grid or on air. */
@@ -1510,6 +2366,8 @@ async function toggleMyMedia(kind) {
   if (kind === 'mic') {
     const me = state.members.find((member) => member.id === state.clientId);
     const mute = !(me?.muted ?? false);
+    // Unmuting has to be heard: make sure there is a microphone to publish.
+    if (!mute) await ensureMicrophone();
     setLocalAudio(!mute);
     await send(CLIENT.MEMBER_UPDATE, { patch: { muted: mute } });
     renderPeople();
@@ -1527,9 +2385,9 @@ async function toggleMyMedia(kind) {
 
   const added = await state.camera.addCamera({ announce: true });
   if (!added) return;
-  const track = added.stream?.getVideoTracks?.()[0];
-  // A camera published mid-call has to be attached to the existing peers.
-  if (state.inCall && track) state.meeting.attachTrack(track, added.stream);
+  // A camera published at any time joins the room mesh, so everyone in the room
+  // sees it - being "in the call" is not a prerequisite.
+  await publishToRoom(added.stream);
   await send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: true } });
   if (!hasControl()) toast('Camera published - the host can put you in the grid', 'ok');
   renderPeople();
@@ -1563,6 +2421,7 @@ const SCENE_FIELDS = {
       ],
     },
     { name: 'durationMs', label: 'Duration (seconds)', type: 'number', value: 12 },
+    { name: 'countdown', label: 'Countdown (seconds, 0 = none)', type: 'number', value: 0 },
   ],
   screenshare: [
     { name: 'sourceId', label: 'Screen source', type: 'screenSelect' },
@@ -1721,6 +2580,8 @@ async function submitSceneForm(event) {
   } else if (type === 'announcement') {
     scene.payload.message = data.get('message');
     scene.payload.priority = data.get('priority');
+    // A countdown on the announcement banner ("doors open in 05:00").
+    scene.payload.countdownMs = Number(data.get('countdown') || 0) * 1000;
     scene.durationMs = Number(data.get('durationMs') || 12) * 1000;
   } else if (type === 'screenshare') {
     scene.payload.sourceId = data.get('sourceId') || null;
@@ -1802,6 +2663,8 @@ function wireControls() {
     const password = $('#join-password').value;
     if (!name || !roomId) return;
     try {
+      // The password page (if this room needs one) comes up on its own after the
+      // join, between the form and the studio.
       await joinRoom({ name, roomId, role, password });
       history.replaceState(null, '', `/?room=${encodeURIComponent(roomId)}&name=${encodeURIComponent(name)}`);
     } catch (error) {
@@ -1814,6 +2677,41 @@ function wireControls() {
     $('#join-password').placeholder = needsPassword ? 'Role password' : 'Not needed to watch';
     $('#join-password').disabled = !needsPassword;
     if (!needsPassword) $('#join-password').value = '';
+    $('#join-password-row')?.classList.toggle('hidden', !needsPassword);
+  });
+
+  // The password page: set one and enter, or skip and set it inside the room.
+  $('#password-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const status = $('#password-status');
+    const result = await saveRoomPasswords({
+      hostPassword: $('#password-host').value.trim(),
+      cohostPassword: $('#password-cohost').value.trim(),
+    });
+    if (!result && status) status.textContent = 'The password was not saved - try again.';
+    else toast('Room password saved', 'ok');
+  });
+
+  $('#btn-skip-password').addEventListener('click', skipPasswordPage);
+  $('#btn-new-suggestion').addEventListener('click', () => {
+    const suggested = suggestPassword();
+    $('#password-suggested').value = suggested;
+    $('#password-host').value = suggested;
+  });
+  $('#btn-use-suggestion').addEventListener('click', () => {
+    $('#password-host').value = $('#password-suggested').value;
+  });
+
+  // Collapse and expand panes from the arrow in each pane's own head.
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest?.('button.pane-toggle[data-pane]');
+    if (button) togglePane(button.dataset.pane);
+  });
+
+  // Slide, grid or list for the people in the room.
+  $('#people-view').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-view]');
+    if (button) setPeopleView(button.dataset.view);
   });
 
   $('#tabs').addEventListener('click', (event) => {
@@ -1859,28 +2757,34 @@ function wireControls() {
     await send(CLIENT.CHAT_SEND, { text });
   });
 
-  // Cameras & screens all live in one pop-up pane now.
+  // Cameras & screens live in the studio's Share tab: the room's Share button and
+  // the Cameras pane both bring it forward, and anyone can publish from there.
   $('#btn-open-devices').addEventListener('click', () => {
     if (!requireControl()) return;
-    openDeviceDialog();
+    openSharePanel();
   });
-  $('#device-dialog-close').addEventListener('click', closeDeviceDialog);
+  $('#btn-share').addEventListener('click', openSharePanel);
+  // Publishing is open to everyone; the placement buttons ask for the host when
+  // the client cannot place things itself (see applyPlacement).
   $('#btn-devices-studio').addEventListener('click', () => addSelectedDevices('studio'));
   $('#btn-devices-grid').addEventListener('click', () => addSelectedDevices('grid'));
   $('#btn-devices-air').addEventListener('click', () => addSelectedDevices('air'));
 
   $('#btn-devices-screen').addEventListener('click', async () => {
-    if (!requireControl()) return;
     const source = await state.camera.addScreenShare({ audio: $('#screen-audio').checked });
     if (source) {
       await send(CLIENT.MEMBER_UPDATE, { patch: { screenSharing: true } });
-      toast('Screen shared - use the Screen program mode to put it on air', 'ok');
+      toast(
+        hasControl()
+          ? 'Screen shared - use the Screen program mode to put it on air'
+          : 'Screen shared with the room - the host can put it on air',
+        'ok',
+      );
       await renderDevicePicker();
     }
   });
 
   $('#btn-devices-bluetooth').addEventListener('click', async () => {
-    if (!requireControl()) return;
     const result = await state.camera.pairBluetooth();
     if (result?.ok) {
       toast(
@@ -1893,11 +2797,8 @@ function wireControls() {
     }
   });
 
-  // Every pane can be shown or hidden, and the choice sticks.
-  $('#pane-toggles').addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-pane]');
-    if (button) togglePane(button.dataset.pane);
-  });
+  // (The pane arrows are wired with the landing controls: each pane's own head
+  // carries the collapse button.)
 
   $('#btn-mute-all').addEventListener('click', async () => {
     if (!requireControl()) return;
@@ -1923,14 +2824,21 @@ function wireControls() {
   $('#credential-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!isHost()) return;
-    const hostPassword = $('#credential-host').value.trim();
-    const cohostPassword = $('#credential-cohost').value.trim();
-    const result = await send(CLIENT.ROOM_UPDATE, { hostPassword, cohostPassword });
-    if (!result) return;
-    state.credentials = result.credentials || state.credentials;
-    renderCredentials();
-    toast('Room passwords updated', 'ok');
+    await saveRoomPasswords({
+      hostPassword: $('#credential-host').value.trim(),
+      cohostPassword: $('#credential-cohost').value.trim(),
+    });
   });
+
+  // Fill both fields with strong suggestions, ready to save.
+  $('#btn-generate-passwords').addEventListener('click', () => {
+    $('#credential-host').value = suggestPassword();
+    $('#credential-cohost').value = suggestPassword();
+    toast('Passwords generated - press Save passwords to apply them', 'info');
+  });
+
+  $('#btn-leave-room').addEventListener('click', leaveRoom);
+  $('#btn-retry-connection').addEventListener('click', retryConnection);
 
   $('#btn-copy-host-password').addEventListener('click', () => copyPassword('hostPassword'));
   $('#btn-copy-cohost-password').addEventListener('click', () => copyPassword('cohostPassword'));
@@ -2017,10 +2925,20 @@ function wireCamera() {
     const host = $('#device-list');
     clear(host);
     const chips = [
-      ...detail.video.map((device, index) => `\u{1F4F7} ${device.label || `Camera ${index + 1}`}`),
-      ...detail.audio.map((device, index) => `\u{1F3A4} ${device.label || `Microphone ${index + 1}`}`),
+      ...detail.video.map((device, index) => [
+        icon('camera', { size: 12 }),
+        device.label || `Camera ${index + 1}`,
+      ]),
+      ...detail.audio.map((device, index) => [
+        icon('mic', { size: 12 }),
+        device.label || `Microphone ${index + 1}`,
+      ]),
     ];
-    for (const chip of chips) host.append(el('span', { class: 'device-chip', text: chip }));
+    for (const [glyph, label] of chips) {
+      const chip = el('span', { class: 'device-chip', html: glyph });
+      chip.append(el('span', { text: label }));
+      host.append(chip);
+    }
     if (!chips.length) host.append(el('span', { class: 'device-chip', text: 'No devices detected yet' }));
   });
 
@@ -2031,9 +2949,17 @@ function wireCamera() {
     renderSources();
     // My own tile shows my video and my controls, so refresh it at once.
     renderParticipants();
-    // Keep an open picker honest about what is already published.
-    const dialog = $('#device-dialog');
-    if (dialog?.open) renderDevicePicker();
+    // Whatever I capture goes to the whole room, whether or not I ever pressed
+    // "Join call": a viewer's camera is seen by everyone in the room.
+    const captured = localMediaStream();
+    if (captured) publishToRoom(captured).catch(() => {});
+    else if (state.meeting.active) state.meeting.setCameraEnabled(false);
+    // The relay follows what I publish (it only runs when peer-to-peer cannot).
+    syncRelay();
+    // Keep an open Share tab honest about what is already published.
+    if ($('#tabs button[data-tab="share"]')?.classList.contains('active')) {
+      renderDevicePicker().catch(() => {});
+    }
   });
 
   for (const type of ['error', 'warning']) {
@@ -2052,48 +2978,113 @@ function wirePublisher() {
 function wireMeeting() {
   state.meeting.addEventListener('stream', ({ detail }) => {
     const grid = $('#remote-grid');
-    const existing = grid.querySelector(`[data-peer="${detail.peerId}"]`);
-    const name = state.members.find((member) => member.id === detail.peerId)?.name || 'Guest';
+    const member = state.members.find((entry) => entry.id === detail.peerId);
+    const name = member?.name || 'Guest';
 
     if (!detail.stream) {
-      existing?.remove();
-      state.peerStreams.delete(detail.peerId);
-      state.camera.removeParticipant(detail.peerId);
+      // One feed ended. Only drop the participant when nothing of theirs is left:
+      // a screen can stop while their camera keeps running.
+      if (detail.streamId) {
+        state.peerStreamIds.delete(detail.streamId);
+        state.camera.removeSource(`stream:${detail.streamId}`).catch(() => {});
+      }
+      const remaining = [...state.peerStreamIds.values()].find((entry) => entry.peerId === detail.peerId);
+      if (remaining) {
+        state.peerStreams.set(detail.peerId, remaining.stream);
+      } else {
+        state.peerStreams.delete(detail.peerId);
+        state.camera.removeParticipant(detail.peerId);
+        grid.querySelector(`[data-peer="${detail.peerId}"]`)?.remove();
+      }
       renderParticipants();
+      renderGridPreview();
+      syncCompositorSources();
       return;
     }
 
+    if (detail.streamId) {
+      state.peerStreamIds.set(detail.streamId, { peerId: detail.peerId, stream: detail.stream });
+    }
     state.peerStreams.set(detail.peerId, detail.stream);
+    const existing = grid.querySelector(`[data-peer="${detail.peerId}"]`);
     const tile = existing || el('div', { class: 'remote-tile', dataset: { peer: detail.peerId } });
     clear(tile);
     const video = el('video', { autoplay: true, playsInline: true });
     video.srcObject = detail.stream;
-    tile.append(video, el('div', { class: 'name', text: name }));
+    // The program mix carries the room, so these tiles stay quiet while it plays.
+    video.muted = programAudioTakesOver();
+    tile.append(video, el('div', { class: 'name' }, [roleDot(member?.role || 'viewer'), name]));
     grid.append(tile);
+
+    // A screen share (or anything that is not the peer's own camera) is attached
+    // under its own id, so it can be composited and a co-host can put it on air.
+    const announced = state.sources.find((entry) => entry.meta?.streamId === detail.streamId);
+    if (announced && announced.kind !== 'camera') {
+      state.camera
+        .attachRemoteSource({
+          id: `stream:${detail.streamId}`,
+          label: `${name} \u00b7 ${sourceKindLabel(announced.kind)}`,
+          stream: detail.stream,
+          peerId: detail.peerId,
+          kind: announced.kind,
+        })
+        .then(() => {
+          syncCompositorSources();
+          renderSources();
+          renderGridPreview();
+        })
+        .catch(() => {});
+    }
 
     // Everyone sees the participant in the room straight away; the host and
     // co-hosts also announce them so they can be composited into the program
     // and put on air.
     state.camera
       .addParticipant({ peerId: detail.peerId, label: name, stream: detail.stream, announce: hasControl() })
-      .then(() => renderParticipants())
-      .catch(() => renderParticipants());
+      .then(() => {
+        renderParticipants();
+        renderGridPreview();
+      })
+      .catch(() => {
+        renderParticipants();
+        renderGridPreview();
+      });
   });
 
   state.meeting.addEventListener('peer-state', ({ detail }) => {
     // A dead connection must not leave a frozen participant in the program.
     if (!['failed', 'closed'].includes(detail.state)) return;
+    for (const [streamId, entry] of [...state.peerStreamIds]) {
+      if (entry.peerId !== detail.peerId) continue;
+      state.peerStreamIds.delete(streamId);
+      state.camera.removeSource(`stream:${streamId}`).catch(() => {});
+    }
     state.peerStreams.delete(detail.peerId);
     state.camera.removeParticipant(detail.peerId);
+    // A dead connection falls back to the socket relay.
+    syncRelay();
     renderParticipants();
+    renderGridPreview();
+    syncCompositorSources();
+  });
+
+  // The studio program arriving from the room's owner: the whole room sees and
+  // hears the real picture, not a reconstruction of it.
+  state.meeting.addEventListener('program-stream', ({ detail }) => {
+    state.programStream = detail.stream || null;
+    renderProgramFeed();
   });
 
   state.meeting.addEventListener('error', ({ detail }) => toast(`call error: ${detail.message}`, 'error'));
 }
 
+/**
+ * "Join call" is about being heard: the room mesh is always up, so joining turns
+ * my microphone on (publishing a camera first when I have none).
+ */
 async function joinCall() {
   try {
-    let stream = state.camera.primaryStream();
+    let stream = localMediaStream();
     if (!stream) {
       // Anyone may publish their own camera now; the host still decides what
       // goes out to the viewers.
@@ -2101,34 +3092,51 @@ async function joinCall() {
       stream = source?.stream || null;
     }
     if (!stream) {
-      toast('a camera is required to join the call', 'error');
+      // No camera? A microphone alone is enough to be heard in the call.
+      const microphone = await ensureMicrophone();
+      stream = microphone?.stream || null;
+    }
+    if (!stream) {
+      toast('a camera or a microphone is required to join the call', 'error');
       return;
     }
     state.inCall = true;
-    await state.meeting.join(stream, meetingPeerIds());
+    await ensureMesh();
+    setLocalAudio(true);
     renderParticipants();
     $('#btn-join-call').disabled = true;
     $('#btn-leave-call').disabled = false;
     $('#btn-toggle-mic').disabled = false;
     $('#btn-toggle-cam').disabled = false;
     send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: true, muted: false } });
-    toast('Joined the call', 'ok');
+    toast('You are live in the call', 'ok');
   } catch (error) {
     toast(error.message, 'error');
   }
 }
 
+/**
+ * Leaving the call stops publishing me - it does not close the room. The mesh is
+ * the room, so everyone still sees and hears the program and each other.
+ */
 async function leaveCall() {
   state.inCall = false;
-  await state.meeting.leave();
-  clear($('#remote-grid'));
-  state.peerStreams.clear();
+  setLocalAudio(false);
+  state.meeting.setCameraEnabled(false);
+  // A member's camera is meeting media, so it leaves with them; the host keeps
+  // the camera that is on the air.
+  if (!hasControl()) {
+    for (const source of state.camera.list()) {
+      if (source.kind === 'camera') await state.camera.removeSource(source.id).catch(() => {});
+    }
+  }
   renderParticipants();
   $('#btn-join-call').disabled = false;
   $('#btn-leave-call').disabled = true;
   $('#btn-toggle-mic').disabled = true;
   $('#btn-toggle-cam').disabled = true;
-  send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: false, screenSharing: false } });
+  send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: false, muted: true } });
+  toast('Microphone off - you still see and hear the room', 'info');
 }
 
 /** Render the library from a list (a server push or a fetch). */

@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "prestart": "npm run build",
     "start": "node server/index.ts",
+    "predev": "npm run build",
     "dev": "node --watch server/index.ts",
     "pretest": "npm run build",
     "test": "node --test --test-concurrency=1",

@@ -32,6 +32,7 @@ browser compositor ──WebM──▶ WebSocket ──▶ ffmpeg (encode once) 
 | Breakout rooms | Split the room into up to 8 sub-rooms with their own chat and call, assign or shuffle the groups, open/close them (optionally on a timer) and message every room at once (`server/studio.js`, `server/signaling.js`) |
 | See all cameras together | Grid program mode composites every selected camera into one picture (`shared/layout.js`) |
 | See everyone who joined | An *In this room* strip on the stage shows every participant of the room you are in, live video included, for every role (`public/js/app.js`) |
+| Program preview, and a grid preview for the studio | Every role sees the program output (the canvas that goes out); the host and co-hosts additionally get a *Grid preview* pane showing the multi-camera arrangement, and clicking a tile puts it on air (`public/js/app.js`, `shared/layout.js`) |
 | Participants in the program | The host/co-hosts announce each participant's call video as a virtual source, so the grid carries them and any one can be put on air (`public/js/devices.js`, `server/studio.js`) |
 | Primary stream plus view switching | Program modes `single` / `grid` / `screenshare`; click "air" on any tile to switch what the platforms receive |
 | Titles, announcements, screenshare, songs, break, end card | Six scene types with live forms, timed or persistent (`shared/overlays.js`) |
@@ -60,6 +61,11 @@ tests. The split exists because the two runtimes need different things:
 
 `npm start` and `npm test` build the client first (`prestart` / `pretest`), and
 `npm run typecheck` type-checks the server, the shared contracts and the tests.
+`shared/` is loaded by the server at start-up **and** compiled into the browser
+bundle, so a change there needs both: `npm run dev` restarts the server for you
+(`node --watch` follows the imports) and rebuilds the client; with `npm start`
+press *Ctrl-C* and start it again, or the running server keeps the old copy of
+the shared module in memory.
 The domain contracts (`Member`, `Source`, `Program`, `BreakoutCatalogue`,
 `RoomSnapshot`, ...) live in `shared/protocol.ts` and are used by both sides.
 The client is converted file by file: its types are still being filled in and the
@@ -99,6 +105,14 @@ is finalised or deleted, so the Library tab is always current). The page also
 reload: the join parameters are kept in memory and replayed on reconnect, and a
 host that proves the host password takes the seat back.
 
+A socket that drops is never silent: a banner across the top says what happened
+and carries a **Retry now** button, the connection pill turns to `reconnecting`,
+and the join bar keeps the room, name and role so **Rejoin** is one click.
+`Leave` empties the client (media included) without a page reload, so another
+room can be joined straight away. The server pings every open socket and drops
+the ones that stop answering, so a closed tab never lingers in the roster as a
+ghost member holding a seat.
+
 ### Roles and passwords
 
 | Role | How you get it | What you can do |
@@ -115,6 +129,18 @@ host is the only client that receives them. A room with no password configured
 generates its own on creation; `POST /api/rooms` hands the generated pair to the
 caller.
 
+**A host that joins a room whose seat is not protected yet gets a password page on
+the way in.** The server always generates a password, but until one is *required*
+the bootstrap rule stands: the first person into an empty room becomes the host.
+So the join form leads to **Protect the host seat** - its own page, not a dialog
+over the studio - with a readable suggestion (`amber-cedar-4821`), a **New
+suggestion** button and **Save password and enter the room**; *Later - enter the
+room* skips it and is remembered per room. Once a host exists the page never
+appears again: the password lives inside the room, in the *People* tab, where the
+host can read it, share it and **change it** at any time (the save button reads
+**Set the room password** until the seat is protected, and **Generate passwords**
+fills both fields).
+
 Viewers and visitors never see the camera/screen pane, the program switches, the
 overlay forms, the platform setup, the go-live box or the password pane - those
 are hidden rather than disabled, and the server refuses the matching messages
@@ -125,7 +151,9 @@ anyway.
 1. **Cameras** - press `Cameras & screens` to open the picker: tick the cameras
    and microphones you want, then choose `Add to studio`, `Add to grid` or `Put
    on air` in the same pop-up. `Share screen` (leave *with sound* ticked for
-   system audio) and `Pair Bluetooth` live in the same pane.
+   system audio) and `Pair Bluetooth` live in the same pane. **The pane stays
+   open after each action**, because devices are usually published and placed in
+   a row - tick the next one and press again; `Close` when you are done.
 2. **Program** - pick `Single camera`, `All cameras` (grid) or `Screen`, and use
    the `air` / `grid` buttons on each tile to choose exactly what goes out.
 3. **Overlays** - the *Scenes* tab has Title, Announcement, Screen share, Song,
@@ -145,11 +173,27 @@ picture as soon as it is added, without re-joining the room.
 
 Everyone in a room sees who else is there: the *In this room* strip on the stage
 lists every participant of the room you are in (main room or breakout) with live
-video as soon as the call delivers it, their role and their mic/camera state, and
-new arrivals are announced to the room as they join.
+video, their role and their mic/camera state, and new arrivals are announced to
+the room as they join.
 
-When a participant's call video reaches the host or a co-host, it is registered
-as a **virtual source** named after them, so it can be composited like any other
+**Turning a camera (or a screen) on publishes it to the whole room** - being "in
+the call" is not a prerequisite. The mesh follows the room, not a button: the
+moment anyone captures media it is handed to every member of that room, so a
+viewer's video shows up in everyone's *In this room* strip, and switching the
+camera off puts the avatar back. **A microphone counts as media too**: unmuting
+adds one if you have none and publishes it, so the host and the viewers are all
+heard by the room. **Screen shares travel the same way**: the sharer announces the
+stream it published with the source, so every client attaches that feed under its
+own id - a co-host can then put a viewer's screen on the program like any other
+source, and it stops cleanly when the share ends (without disturbing that
+person's camera).
+*Join call* is about being **heard** (it turns
+your microphone on and publishes a camera if you have none); *Leave* mutes you and
+drops a member's meeting camera, while the host keeps the camera that is on the
+air.
+
+When a participant's video reaches the host or a co-host, it is registered as a
+**virtual source** named after them, so it can be composited like any other
 camera:
 
 - `All cameras` (grid) now includes the participants who are in the call.
@@ -162,12 +206,83 @@ the program audio too - use headphones so the program does not pick up the room.
 Only the host and co-hosts can announce a participant, which is what makes them
 part of what goes out.
 
-### Panes you can hide
+### Panes that collapse
 
-The top bar has a toggle for every pane - `Program`, `Participants`, `Cameras`
-and `Sidebar` - so you can build the layout you want (a clean program monitor, a
-full-width sidebar, or everything at once). The choice is remembered in the
-browser, and it is independent of what your role is allowed to see.
+Every pane carries its own collapse arrow, so the top bar stays free for who you
+are, where you are, your state and the way out:
+
+- `V` in the `Program`, `In this room`, `Grid preview` and `Cameras & screens`
+  heads collapses that pane down to its header - the arrow stays there, now `>`,
+  to bring it straight back.
+- `<` in the studio sidebar collapses it to a thin strip (`>` to expand).
+- The choice is remembered in the browser, and it is independent of what your role
+  is allowed to see (`Grid preview` and `Cameras & screens` are host/co-host panes,
+  so viewers and visitors never get them, arrows included).
+
+### Getting in: the landing page
+
+The name, room code, role, password and the join button live on a landing page
+*before* you enter a room. Once you are in, the page gives way to the studio and
+the top bar carries only the essentials: your name, the room, `online`, your role
+and a red **Leave** with an exit icon. Leaving brings the landing page back, ready
+for the next room.
+
+A **brand new room has no host yet**, so if you pick *Host* for a room that has
+none, the landing page offers to **set the host password** there and then (the
+room code is checked as you type). Once a host has been assigned the offer
+disappears from the landing page: the password lives inside the room, in the
+*People* tab, where the host can read it, share it and **change it** at any time.
+
+### How the room is shown
+
+The *In this room* strip has three views, switchable in its head:
+
+- **Slide** - a filmstrip you scroll sideways (the default for a small room).
+- **Grid** - tiles side by side, like the program grid.
+- **List** - one row per person with their mic/camera controls. A room with **more
+  than 50 people** starts here, because slides and grids stop being readable at
+  that size; a smaller room starts on slides and can be switched to the grid.
+
+### Two previews: the program, and the grid
+
+- The **program preview** owns the width of the page and about **90% of the
+  view**, with the *In this room* strip directly under it; nothing is ever
+  mirrored, so a camera or a shared screen looks the same to everyone. It is the
+  output itself - the canvas that is streamed to the platforms and recorded, and
+  every role sees it, because that is the picture everyone is watching. Everything
+  else lives in the tabbed sidebar (or in the *Grid preview* / *Cameras &
+  screens* panes below), each of which can be collapsed and brought back from the
+  arrow in its own head.
+  The host's picture is sent to the rest of the room over its own WebRTC channel
+  (marked `kind: 'program'`), **picture and program audio together**, so every
+  participant watches and hears the real program - overlays, countdowns and all -
+  in tens of milliseconds, without going near the RTMP relay or its live delay.
+  **What travels is the real streaming video**: when a single camera or screen is
+  on air, its own track goes out - to the room *and* to the encoder - with no
+  canvas in the way; the canvas is used only when something genuinely has to be
+  composited (the grid, or an overlay on air). Switching what is on air while live
+  re-points the encoder at the new source.
+  The pane says `live program` while the received feed is on screen; the meeting
+  tiles go quiet then, because the program mix already contains the room (in a
+  breakout the room keeps its own audio and the feed is muted, picture only).
+- The **grid preview** is a studio tool for the host and co-hosts: it lays the
+  cameras, screens and announced participants out exactly like the program grid
+  (`All cameras` mode), so you can see the arrangement before it goes out. It
+  shows how many tiles are live, marks the ones already on air in green, and
+  clicking a tile puts that source straight on air. It only renders while you
+  hold a control role and the pane is open - viewers and visitors never get one.
+
+### Announcements with a countdown
+
+The *Announcement* scene takes a **countdown** as well as a message and a
+priority: the banner carries the countdown on the right, and it really counts
+down (`doors open in 05:00`, then `04:59`, ...) because the picture is redrawn
+from the scene's age rather than from the value that was asked for. The same
+applies to the *Break* card. **A countdown is a promise to come back**: it is also
+the lifetime of the card, so when it reaches zero the scene clears itself and the
+program picture resumes - no one has to press *Clear overlay*. The *Scenes* tab
+shows the remaining time next to the scene and repaints it once a second, so the
+countdown is visible on the program output and in the studio UI at the same time.
 
 ### Participants, and being shown
 
@@ -180,6 +295,16 @@ switch anyone's, and the target's client applies it at once.
 
 Publishing and placement are immediate, never a two-step:
 
+- **Share** in the top bar opens the *Cameras & screens* **Share tab** of the
+  studio sidebar (nothing pops over the room), for **every** role - the host also
+  opens it from the *Cameras & screens* pane. It lists every camera and microphone
+  the machine exposes, with what is already published marked, and ticks the rest
+  for you.
+- The picker's three actions follow the role: the host and co-hosts get
+  `Add to studio` / `Add to grid` / `Put on air`, while everyone else gets
+  `Publish to the room` / `ask for grid` / `ask for air` - publishing always
+  reaches the whole room over the mesh, and placing it is a request the host sees
+  at once. **Share screen** and **Pair Bluetooth** are open to everyone too.
 - `Add to studio` / `Add to grid` / `Put on air` in the **Cameras & screens**
   pane act on the ticked devices - or, if nothing is ticked, on what is already
   published (or the first camera) - then close the pane so the program preview
@@ -281,6 +406,12 @@ target set.
 | `QUANDRITE_MAX_DESTINATIONS` | `8` | Destinations per room |
 | `QUANDRITE_MAX_SOURCES` | `24` | Media sources per room |
 | `QUANDRITE_MAX_BREAKOUTS` | `8` | Breakout rooms a room can be split into |
+| `QUANDRITE_STUN_URLS` | `stun:stun.l.google.com:19302` | Comma-separated STUN servers handed to every client |
+| `QUANDRITE_TURN_URLS` | *unset* | Comma-separated TURN servers (`turn:relay.example.org:3478`) - what makes calls work across strict firewalls and symmetric NAT |
+| `QUANDRITE_TURN_USERNAME` | *unset* | TURN username |
+| `QUANDRITE_TURN_CREDENTIAL` | *unset* | TURN credential |
+| `QUANDRITE_TLS_CERT` | *unset* | TLS certificate path: the studio is then served over HTTPS |
+| `QUANDRITE_TLS_KEY` | *unset* | TLS key path |
 | `QUANDRITE_SMTP_URL` | *unset* | SMTP relay for mailing the host password (`smtp://user:pass@host:587`) |
 | `QUANDRITE_MAIL_WEBHOOK` | *unset* | Alternative: POST the message as JSON to this URL |
 | `QUANDRITE_MAIL_FROM` | `Quandrite <no-reply@quandrite.local>` | From address of the password mail |
@@ -310,6 +441,54 @@ GET    /recordings/:file                  play / download a recording
 The response is the room snapshot plus a `credentials` object - the only place
 the passwords are ever returned, and only to the caller that created the room.
 
+## Across the internet
+
+The meeting mesh is peer to peer, so three things decide whether two people on
+different networks can see and hear each other:
+
+1. **The signaling server has to be reachable.** The WebSocket that carries
+   `join`, the SDP offers/answers and the ICE candidates is this app's own server
+   (`server/signaling.ts`), and it is room scoped - not a blind broadcast to every
+   socket. Put it on a public host (Render, Railway, Fly, a VPS) and everyone
+   points at `wss://your-studio.example.com/ws`; `ws://localhost:8080` only works
+   for people on your own machine.
+2. **STUN finds a route, TURN makes one when there is none - and the socket
+   carries the picture when both fail.** Most home networks get through with STUN
+   alone, but symmetric NAT, corporate firewalls and some mobile networks block a
+   direct connection. A TURN relay is the proper fix:
+
+   ```bash
+   QUANDRITE_STUN_URLS=stun:stun.l.google.com:19302 \
+   QUANDRITE_TURN_URLS=turn:relay.example.org:3478 \
+   QUANDRITE_TURN_USERNAME=user \
+   QUANDRITE_TURN_CREDENTIAL=secret \
+   npm start
+   ```
+
+   The list is handed to every client in the `welcome` message and used for both
+   the meeting connections and the program feed, so no client needs a rebuild to
+   pick it up. Self-host Coturn, or use a managed relay (Metered, Xirsys, Twilio).
+
+   **If nothing else works, the studio still shows the picture.** While a peer
+   connection exists but is not `connected`, each client posts its own camera and
+   screen as low-rate JPEG frames (`QMR1` frames, ~4 fps, 480 px) over the same
+   WebSocket the studio already uses; the server fans them out to the room, the
+   tiles show them, and they can be composited onto the program like any other
+   source. It costs bandwidth and it is not full frame rate - TURN is still the
+   better path - but a camera or a shared screen is never invisible, whatever the
+   two networks do to each other.
+3. **The page has to be a secure origin.** Browsers only hand out the camera, the
+   microphone and the screen on HTTPS (or `localhost`). Give the server a
+   certificate and it serves TLS itself - the WebSocket follows as `wss://`:
+
+   ```bash
+   QUANDRITE_TLS_CERT=/etc/letsencrypt/live/studio.example.com/fullchain.pem \
+   QUANDRITE_TLS_KEY=/etc/letsencrypt/live/studio.example.com/privkey.pem \
+   npm start
+   ```
+
+   (A reverse proxy that terminates TLS in front of the app works just as well.)
+
 ## WebSocket protocol
 
 `ws://<host>/ws`, JSON messages with an optional `id` for request/response acks.
@@ -336,7 +515,11 @@ roster, the catalogue, the chat of the room it entered and the studio state),
 `sources:update`, `program:update`, `scene:update`, `destinations:update`,
 `stream:update`, `recording:update`, `recordings:update` (the room's recording
 library, pushed when one is finalised or deleted), `webrtc:signal`, `relay:log`.
-Binary frames sent by the active publisher are the program feed. The `welcome`
+A studio push carries its body in `payload` and the client transport dispatches
+that payload, so `socket.on('sources:update', (sources) => ...)` receives the
+array of sources; the flat messages (`welcome`, `member:media`, `webrtc:signal`,
+`pong`) have no `payload` and are dispatched whole. Binary frames sent by the
+active publisher are the program feed. The `welcome`
 message also reports whether the host password can be mailed (`mail.enabled`).
 
 ## Tests

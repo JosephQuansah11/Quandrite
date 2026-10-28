@@ -121,7 +121,10 @@ export class CameraManager extends EventTarget {
     if (announce) {
       try {
         await this.socket.send(CLIENT.SOURCE_ADD, {
-          source: { id, kind, label, deviceId, groupId, meta },
+          // `streamId` is the MediaStream id: it lets every other client match the
+          // media this source publishes over the room mesh back to the source,
+          // so a co-host can put a viewer's camera or screen on the program.
+          source: { id, kind, label, deviceId, groupId, meta: { ...meta, streamId: stream?.id || null } },
         });
       } catch (error) {
         // Someone else already announced it (two hosts can see the same peer),
@@ -334,9 +337,68 @@ export class CameraManager extends EventTarget {
     });
   }
 
+  /**
+   * A peer's picture that arrived over the socket instead of peer to peer.
+   *
+   * It is kept as an `<img>`, which the compositor draws exactly like a video, so
+   * a relayed camera or screen can be shown in the room and put on the program.
+   */
+  attachRemoteImage({ id, label = null, peerId = null, url, kind = 'virtual' }) {
+    if (!id || !url) return null;
+    let source = this.sources.get(id);
+    if (!source) {
+      const image = document.createElement('img');
+      image.alt = '';
+      image.className = 'relayed-picture';
+      source = {
+        id,
+        kind,
+        label: label || 'Shared picture',
+        deviceId: null,
+        groupId: null,
+        stream: null,
+        video: image,
+        meta: { peerId, relayed: true },
+        addedAt: Date.now(),
+        announced: false,
+        stopTracksOnRemove: false,
+      };
+      this.sources.set(id, source);
+    }
+    if (source.video?.tagName === 'IMG') source.video.src = url;
+    this._emit('change', this.list());
+    return source;
+  }
+
   /** Detach a participant feed (the mesh owns its tracks). */
   removeParticipant(peerId) {
     return this.removeSource(`participant:${peerId}`);
+  }
+
+  /**
+   * Attach the media a peer published for one of their announced sources (a
+   * screen share, say) under a key of its own, so the compositor can draw it and
+   * a co-host can put it on the program.
+   */
+  attachRemoteSource({ id, label = null, stream, peerId = null, kind = 'virtual' }) {
+    if (!id || !stream) return null;
+    const existing = this.sources.get(id);
+    if (existing) {
+      existing.stream = stream;
+      if (existing.video) existing.video.srcObject = stream;
+      this._emit('change', this.list());
+      return existing;
+    }
+    return this._registerSource({
+      id,
+      kind,
+      label: label || 'Shared feed',
+      stream,
+      meta: { peerId, remote: true },
+      announce: false,
+      stopTracksOnRemove: false,
+      quiet: true,
+    });
   }
 
   /** Participant feeds currently attached, in join order. */

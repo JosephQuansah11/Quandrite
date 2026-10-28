@@ -7,6 +7,7 @@ import {
   createOverlay,
   formatCountdown,
   overlayDrawModel,
+  remainingCountdownMs,
   validateOverlay,
   wrapText,
 } from '../shared/overlays.ts';
@@ -154,6 +155,76 @@ test('overlayDrawModel handles each scene type and the idle state', () => {
     { width: 1280, height: 720 },
   );
   assert.ok(song.ops.some((op) => op.kind === 'image'), 'song draws artwork when provided');
+});
+
+test('an announcement can carry a countdown that really counts down', () => {
+  const requested = validateOverlay({
+    type: 'announcement',
+    payload: { message: 'Doors open soon', countdownMs: 300000 },
+  });
+  assert.equal(requested.ok, true);
+  assert.equal(requested.value.payload.countdownMs, 300000);
+
+  const plain = validateOverlay({ type: 'announcement', payload: { message: 'Hello' } });
+  assert.equal(plain.value.payload.countdownMs, 0, 'no countdown unless one is asked for');
+
+  const negative = validateOverlay({
+    type: 'announcement',
+    payload: { message: 'Hello', countdownMs: -5 },
+  });
+  assert.equal(negative.value.payload.countdownMs, 0);
+
+  const scene = {
+    type: 'announcement',
+    payload: { message: 'Doors open', countdownMs: 300000 },
+    createdAt: 1_000_000,
+  };
+  const atStart = overlayDrawModel(scene, { width: 1280, height: 720, now: 1_000_000 });
+  assert.ok(
+    atStart.ops.some((op) => op.kind === 'text' && op.text === '05:00'),
+    'the banner shows the countdown',
+  );
+
+  const oneMinuteLater = overlayDrawModel(scene, { width: 1280, height: 720, now: 1_060_000 });
+  assert.ok(
+    oneMinuteLater.ops.some((op) => op.kind === 'text' && op.text === '04:00'),
+    'and it ticks down on the picture',
+  );
+
+  const finished = overlayDrawModel(scene, { width: 1280, height: 720, now: 1_600_000 });
+  assert.ok(
+    !finished.ops.some((op) => op.kind === 'text' && op.text === '00:00'),
+    'a finished countdown is not drawn at all',
+  );
+});
+
+test('remainingCountdownMs subtracts the time already elapsed', () => {
+  assert.equal(remainingCountdownMs({ payload: { countdownMs: 0 } }, 5), 0);
+  assert.equal(remainingCountdownMs({ payload: { countdownMs: 65000 } }, 5), 65000, 'no timestamp: as requested');
+  assert.equal(remainingCountdownMs({ payload: { countdownMs: 65000 }, createdAt: 1000 }, 1000), 65000);
+  assert.equal(remainingCountdownMs({ payload: { countdownMs: 65000 }, createdAt: 1000 }, 5000), 61000);
+  assert.equal(remainingCountdownMs({ payload: { countdownMs: 65000 }, createdAt: 1000 }, 999999), 0, 'never negative');
+});
+
+test('a countdown ends the scene, so the program resumes by itself', () => {
+  // A break with a countdown is a promise to come back: the countdown is the
+  // lifetime, and the card leaves the air when it reaches zero.
+  const brk = validateOverlay({ type: 'break', payload: { message: 'Back soon', countdownMs: 120000 } });
+  assert.equal(brk.ok, true);
+  assert.equal(brk.value.durationMs, 120000);
+  assert.equal(brk.value.persistent, false, 'a countdown scene is not persistent');
+
+  const created: any = createOverlay(
+    { type: 'announcement', payload: { message: 'Doors open soon', countdownMs: 300000 }, durationMs: 12000 },
+    { now: 1_000_000, idFactory: () => 'scene-cd' },
+  );
+  assert.equal(created.value.durationMs, 300000, 'the longer of the countdown and the duration wins');
+  assert.equal(created.value.expiresAt, 1_300_000, 'and that is when it clears itself');
+
+  // Without a countdown nothing changes: a persistent card stays until cleared.
+  const persistent = validateOverlay({ type: 'break', payload: { message: 'Back soon' }, persistent: true });
+  assert.equal(persistent.value.persistent, true);
+  assert.equal(persistent.value.durationMs, 0);
 });
 
 test('wrapText and formatCountdown behave predictably', () => {

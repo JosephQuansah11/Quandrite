@@ -3,10 +3,11 @@
  *
  * Request/response calls are promise based (`send()` resolves with the ack),
  * and server pushes are dispatched as events named after the protocol type so
- * callers can subscribe with `socket.on('stream:update', handler)`.
+ * callers can subscribe with `socket.on('stream:update', handler)`. A push that
+ * carries a `payload` is dispatched as that payload, not as the envelope.
  */
 
-import { CLIENT, SERVER } from '/shared/protocol.js';
+import { CLIENT, SERVER, decodeRelayFrame, encodeRelayFrame, isRelayFrame, pushPayload } from '/shared/protocol.js';
 
 export class QuandriteSocket extends EventTarget {
 
@@ -54,7 +55,10 @@ export class QuandriteSocket extends EventTarget {
     });
 
     socket.addEventListener('message', (event) => {
-      if (typeof event.data !== 'string') return;
+      if (typeof event.data !== 'string') {
+        this._handleBinary(event.data);
+        return;
+      }
       let message;
       try {
         message = JSON.parse(event.data);
@@ -93,6 +97,13 @@ export class QuandriteSocket extends EventTarget {
     this.dispatchEvent(new CustomEvent(type, { detail }));
   }
 
+  /**
+   * Dispatch one server message.
+   *
+   * Studio pushes carry their body in `payload` and are dispatched as that
+   * payload, so `socket.on('sources:update', (sources) => ...)` really gets the
+   * array of sources; the flat messages are dispatched whole. See `pushPayload`.
+   */
   _handle(message) {
     if (message.type === SERVER.ACK || message.type === SERVER.ERROR) {
       const entry = message.id ? this.pending.get(message.id) : null;
@@ -107,7 +118,7 @@ export class QuandriteSocket extends EventTarget {
       this._emit('server-error', message);
       return;
     }
-    this._emit(message.type, message);
+    this._emit(message.type, pushPayload(message));
   }
 
   /**
@@ -149,6 +160,39 @@ export class QuandriteSocket extends EventTarget {
     }
     this.socket.send(buffer);
     return true;
+  }
+
+  /**
+   * Binary frames: a relayed camera/screen picture, or a program chunk.
+   *
+   * Relayed pictures are dispatched as `media:frame`; program chunks as
+   * `media:chunk` (the publisher's own feed coming back is ignored upstream).
+   */
+  _handleBinary(data) {
+    const buffer = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+    if (isRelayFrame(buffer)) {
+      const decoded = decodeRelayFrame(buffer);
+      if (decoded) this._emit('media:frame', decoded);
+      return;
+    }
+    this._emit('media:chunk', { data: buffer });
+  }
+
+  /**
+   * Post one relayed picture.
+   *
+   * Used when peer-to-peer cannot carry the camera or the screen, so the room
+   * still sees it over the socket the studio already uses.
+   */
+  sendRelayFrame(header, payload) {
+    if (!this.connected) return false;
+    if (this.socket.bufferedAmount > 2 * 1024 * 1024) return false;
+    try {
+      this.socket.send(encodeRelayFrame(header, payload));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   _flushBackpressure() {

@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { CLIENT, SERVER, PROTOCOL_VERSION, canControlBroadcast, validateEnvelope } from '../shared/protocol.ts';
+import { CLIENT, SERVER, PROTOCOL_VERSION, RELAY_MAX_FPS, canControlBroadcast, decodeRelayFrame, encodeRelayFrame, isRelayFrame, validateEnvelope } from '../shared/protocol.ts';
 import { OVERLAY_DEFINITIONS, REQUESTABLE_OVERLAY_TYPES } from '../shared/overlays.ts';
 import { listPlatforms } from '../shared/destinations.ts';
 
@@ -71,7 +71,7 @@ export class SignalingServer {
 
     socket.on('message', (data, isBinary) => {
       if (isBinary) {
-        this._onProgramChunk(session, data);
+        this._onBinary(session, data);
         return;
       }
       let parsed;
@@ -103,6 +103,9 @@ export class SignalingServer {
       sceneTypes: REQUESTABLE_OVERLAY_TYPES,
       overlayDefinitions: OVERLAY_DEFINITIONS,
       platforms: listPlatforms(),
+      // STUN/TURN, so the meeting mesh can cross networks instead of only working
+      // between devices that can reach each other directly.
+      iceServers: this.config.iceServers || [],
       // Whether the host password can be mailed from here.
       mail: { enabled: Boolean(this.mailer?.enabled), from: this.mailer?.from || null },
     });
@@ -395,6 +398,47 @@ export class SignalingServer {
     // A member who reconnects into an open breakout room goes back there.
     this._syncBreakoutSessions(studio);
     return undefined;
+  }
+
+  /** Binary frames are either the program feed or a relayed picture. */
+  _onBinary(session, data) {
+    const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (isRelayFrame(buffer)) {
+      this._onRelayFrame(session, buffer);
+      return;
+    }
+    this._onProgramChunk(session, buffer);
+  }
+
+  /**
+   * A camera or screen picture relayed over the socket.
+   *
+   * Peer-to-peer is always tried first; when two networks will not let the
+   * browsers reach each other (strict NAT, corporate Wi-Fi, mobile data), the
+   * room still has to see the picture - so the sender posts low-rate JPEG frames
+   * here and the server fans them out to the room it is in.
+   */
+  _onRelayFrame(session, buffer) {
+    const studio = session.studio;
+    if (!studio) return;
+    const decoded = decodeRelayFrame(buffer);
+    if (!decoded) return;
+
+    // A relay is a fallback, not a second full-quality feed.
+    const now = Date.now();
+    if (now - (session.lastRelayAt || 0) < 1000 / RELAY_MAX_FPS) return;
+    session.lastRelayAt = now;
+
+    const frame = encodeRelayFrame(
+      { ...decoded.header, from: session.id, fromName: session.name },
+      decoded.payload,
+    );
+    const roomId = session.attendedRoomId || studio.id;
+    for (const clientId of this.roomClients.get(roomId) || []) {
+      if (clientId === session.id) continue;
+      const target = this.sessions.get(clientId);
+      if (target?.socket?.readyState === 1) target.socket.send(frame);
+    }
   }
 
   /** Binary frames are the program feed produced by the host compositor. */

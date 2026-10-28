@@ -22,6 +22,36 @@ function intEnv(name, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+/** A comma separated environment value, as a list. */
+function csv(value) {
+  return String(value || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The ICE servers every client is handed.
+ *
+ * STUN is enough to find each other on most home networks; a TURN server is what
+ * makes a call work across strict firewalls and symmetric NAT, because it relays
+ * the media when a direct connection cannot be made.
+ */
+export function iceServersFrom(config: any = {}) {
+  const servers: any[] = [];
+  const stun = config.stunUrls || [];
+  if (stun.length) servers.push({ urls: stun });
+  const turn = config.turnUrls || [];
+  if (turn.length) {
+    servers.push({
+      urls: turn,
+      ...(config.turnUsername ? { username: config.turnUsername } : {}),
+      ...(config.turnCredential ? { credential: config.turnCredential } : {}),
+    });
+  }
+  return servers;
+}
+
 /**
  * Locate an ffmpeg executable.
  *
@@ -89,6 +119,18 @@ export function loadConfig(overrides: any = {}) {
     maxSourcesPerRoom: intEnv('QUANDRITE_MAX_SOURCES', 24),
     maxDestinationsPerRoom: intEnv('QUANDRITE_MAX_DESTINATIONS', 8),
     maxChunkBytes: intEnv('QUANDRITE_MAX_CHUNK_BYTES', 8 * 1024 * 1024),
+    // WebRTC reachability. STUN lets peers discover each other; a TURN server
+    // relays the media when their networks refuse a direct connection (symmetric
+    // NAT, corporate firewalls, mobile data). Without TURN, calls only work when
+    // both sides happen to be reachable directly.
+    stunUrls: csv(process.env.QUANDRITE_STUN_URLS || 'stun:stun.l.google.com:19302'),
+    turnUrls: csv(process.env.QUANDRITE_TURN_URLS || process.env.QUANDRITE_TURN_URL || ''),
+    turnUsername: process.env.QUANDRITE_TURN_USERNAME || '',
+    turnCredential: process.env.QUANDRITE_TURN_CREDENTIAL || '',
+    // Serve over HTTPS when a certificate is given: browsers only hand out the
+    // camera and the microphone on a secure origin (or localhost).
+    tlsCert: process.env.QUANDRITE_TLS_CERT || '',
+    tlsKey: process.env.QUANDRITE_TLS_KEY || '',
     relay: {
       liveDelayMs: intEnv('QUANDRITE_LIVE_DELAY_MS', 900),
       stopTimeoutMs: intEnv('QUANDRITE_STOP_TIMEOUT_MS', 6000),
@@ -104,6 +146,8 @@ export function loadConfig(overrides: any = {}) {
     ...overrides,
     relay: { ...base.relay, ...(overrides.relay || {}) },
   };
+  // Handed to every client, so a call can cross networks.
+  config.iceServers = overrides.iceServers || iceServersFrom(config);
 
   fs.mkdirSync(config.recordingsDir, { recursive: true });
   return config;

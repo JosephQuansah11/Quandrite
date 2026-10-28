@@ -91,6 +91,41 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 .join-form input { flex: 1 1 auto; }
 .join-form select { width: auto; }
 
+/* Sharing your camera or screen is a room action, open to everyone. */
+.share-button {
+  display: inline-flex; align-items: center; gap: 6px;
+  border-color: var(--accent); color: #bae6fd; background: rgba(56, 189, 248, .14);
+  font-weight: 600;
+}
+.share-button:hover { background: rgba(56, 189, 248, .24); }
+.share-button svg { display: block; }
+
+/* Who I am and where I am: the only identity the top bar carries. */
+.who { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.leave-button {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #dc2626; border-color: #ef4444; color: #fff; font-weight: 600;
+}
+.leave-button:hover { background: #ef4444; border-color: #f87171; }
+.leave-button svg { display: block; }
+
+/* ------------------------------------------------------------------ landing */
+
+.landing { display: grid; place-items: center; padding: 36px 16px 60px; }
+.landing-card {
+  width: min(520px, 96vw); display: grid; gap: 12px;
+  background: linear-gradient(180deg, rgba(20, 30, 54, .95), rgba(12, 19, 36, .95));
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px;
+}
+.landing-card h1 { font-size: 20px; }
+.landing-card p { margin: 0; font-size: 12.5px; }
+.landing-card .form label { display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.landing-card .form input,
+.landing-card .form select { width: 100%; }
+.landing-card small { font-size: 11px; }
+#join-status:empty { display: none; }
+
 .status-cluster { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
 .pill {
   font-size: 11px;
@@ -123,6 +158,10 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   padding: 16px;
   align-items: start;
 }
+/* The program picture is the whole width, with the people in the room right
+   under it; the studio tools and the tabbed sidebar sit below. */
+.layout > .program-panel,
+.layout > .participants-panel { grid-column: 1 / -1; }
 @media (max-width: 1100px) {
   .layout { grid-template-columns: minmax(0, 1fr); }
 }
@@ -154,10 +193,27 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   overflow: hidden;
   background: #04070f;
   border: 1px solid var(--line);
-  aspect-ratio: 16 / 9;
+  /* The program picture is the point of the page: about 90% of the view. */
+  aspect-ratio: auto;
+  height: 90vh;
+  max-height: 90vh;
 }
-#program-canvas { width: 100%; height: 100%; display: block; }
-.program-overlay-badges { position: absolute; top: 10px; right: 12px; display: flex; gap: 8px; }
+#program-canvas { width: 100%; height: 100%; display: block; object-fit: contain; }
+/* Nothing is mirrored: what the camera sees is what everyone else sees. */
+.program-frame canvas,
+.program-feed,
+.participant-tile video,
+.participant-tile img,
+.source-tile video,
+.grid-preview-tile video { transform: none; }
+/* The program feed the room's owner sends: the real picture, laid over the
+   local reconstruction, so overlays and countdowns are the ones going out. */
+.program-feed {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; background: #04070f; z-index: 1;
+}
+.badge.feed { background: rgba(37, 99, 235, .92); color: #fff; }
+.program-overlay-badges { position: absolute; top: 10px; right: 12px; display: flex; gap: 8px; z-index: 2; }
 .badge {
   font-size: 11px; font-weight: 700; letter-spacing: .08em;
   padding: 4px 8px; border-radius: 6px;
@@ -265,6 +321,46 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   background: linear-gradient(135deg, rgba(56, 189, 248, .18), rgba(168, 85, 247, .18));
 }
 .participant-tile.live .avatar { display: none; }
+/* The grid preview: the multi-camera picture, host and co-hosts only. */
+.grid-preview { display: grid; gap: 8px; }
+.grid-preview-tile {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #05080f;
+  cursor: pointer;
+}
+.grid-preview-tile.on-air { border-color: var(--ok); box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.5); }
+.grid-preview-tile video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.grid-preview-placeholder {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  padding: 8px;
+  font-size: 11.5px;
+  text-align: center;
+  color: var(--muted);
+}
+.grid-preview-bar { display: flex; align-items: center; gap: 6px; padding: 5px 8px; font-size: 11px; background: #0d1526; }
+.grid-preview-bar .name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grid-preview-bar .grid-live { color: #86efac; font-weight: 600; }
+
+.connection-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.14);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+}
+.connection-banner.hidden { display: none; }
+.join-form.in-room input,
+.join-form.in-room select { opacity: 0.72; }
+
 .participant-tile .name { font-size: 12px; font-weight: 600; padding: 6px 8px 0; }
 .participant-tile .sub { font-size: 10.5px; color: var(--muted); padding: 0 8px 6px; }
 /* My own mic/camera controls, right on my tile. */
@@ -274,22 +370,52 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 
 /* ---------------------------------------------------------- dialogs & panes */
 
-.pane-hidden { display: none !important; }
-.layout.sidebar-hidden { grid-template-columns: minmax(0, 1fr); }
+/* --------------------------------------------------- collapsible panes */
+/* A relayed picture (the socket fallback) sits where the live video would. */
+.participant-tile img.tile-picture {
+  width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #05080f;
+}
+.participant-strip.list .participant-tile img.tile-picture { width: 72px; height: 40px; aspect-ratio: auto; border-radius: 6px; }
+img.relayed-picture { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #05080f; }
+
+/* A collapsed pane keeps its head, so its arrow is always there to bring the
+   pane back - the top bar stays free for who/where/state/leave. */
+.panel.pane-collapsed > *:not(.panel-head) { display: none !important; }
+.panel.pane-collapsed .panel-head { margin-bottom: 0; }
+.sidebar.pane-collapsed > *:not(.sidebar-head) { display: none !important; }
+.sidebar.pane-collapsed .sidebar-head { margin-bottom: 0; }
+.sidebar.pane-collapsed { padding: 8px; }
+.layout.sidebar-collapsed { grid-template-columns: minmax(0, 1fr) 52px; }
+
+.sidebar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.sidebar-head strong { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.sidebar-head .pane-toggle { margin-left: auto; }
+
+.pane-toggle {
+  margin-left: auto; min-width: 28px; padding: 2px 7px;
+  font-size: 12px; line-height: 1.3; background: transparent; color: var(--muted);
+}
+.pane-toggle:hover { color: var(--text); border-color: var(--accent); }
+
+/* --------------------------------------------------- how the room is shown */
+
+.participant-strip.slide { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+.participant-strip.slide .participant-tile { flex: 0 0 clamp(160px, 22vw, 240px); }
+.participant-strip.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+/* A big room is a list: everybody, with their controls, in one column. */
+.participant-strip.list { display: grid; grid-template-columns: 1fr; gap: 6px; }
+.participant-strip.list .participant-tile { display: flex; align-items: center; gap: 10px; padding: 6px 8px; }
+.participant-strip.list .participant-tile video { width: 72px; height: 40px; aspect-ratio: auto; border-radius: 6px; }
+.participant-strip.list .participant-tile .avatar {
+  width: 72px; height: 40px; aspect-ratio: auto; font-size: 13px; border-radius: 6px;
+}
+.participant-strip.list .participant-tile .name { flex: 1 1 auto; padding: 0; }
+.participant-strip.list .participant-tile .sub { flex: 0 0 auto; padding: 0; }
+.participant-strip.list .participant-tile .tile-actions { flex: 0 0 auto; padding: 0; justify-content: flex-end; }
 
 .pane-toggles { display: flex; gap: 4px; flex-wrap: wrap; }
 .pane-toggles button[aria-pressed='true'] { border-color: var(--accent); color: #bae6fd; background: rgba(56, 189, 248, .14); }
 
-.device-dialog {
-  width: min(560px, 92vw); max-height: 86vh; overflow: auto;
-  border: 1px solid var(--line); border-radius: var(--radius);
-  background: linear-gradient(180deg, rgba(20, 30, 54, .98), rgba(12, 19, 36, .98));
-  color: var(--text); padding: 16px; display: grid; gap: 12px;
-}
-.device-dialog::backdrop { background: rgba(3, 6, 14, .7); backdrop-filter: blur(2px); }
-.device-dialog .dialog-head { display: flex; align-items: center; gap: 12px; }
-.device-dialog .dialog-head h2 { font-size: 15px; flex: 1 1 auto; }
-.device-dialog p { margin: 0; font-size: 12px; }
 .dialog-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 .device-picker { display: grid; gap: 6px; }
@@ -350,8 +476,23 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
   font-weight: 600;
 }
+.icon { vertical-align: -2px; }
+button .icon { margin-right: 5px; }
+.device-chip .icon { margin-right: 4px; }
+.media-state .icon { margin-right: 4px; }
+
 .role-badge.role-host { border-color: var(--accent); color: #bae6fd; background: rgba(56, 189, 248, .14); }
 .role-badge.role-cohost { border-color: var(--accent-2); color: #e9d5ff; background: rgba(168, 85, 247, .14); }
+
+/* Who is who at a glance: host, co-host, and everyone who is watching. */
+.role-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 6px; vertical-align: middle; background: var(--muted);
+}
+.role-dot.role-host { background: var(--accent); }
+.role-dot.role-cohost { background: var(--accent-2); }
+.role-dot.role-viewer,
+.role-dot.role-visitor { background: var(--ok); }
 
 .credentials { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
 .credentials h3 { font-size: 13px; }

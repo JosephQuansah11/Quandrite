@@ -6,7 +6,8 @@ import path from 'node:path';
 import { WebSocket } from 'ws';
 
 import { createServer } from '../server/index.ts';
-import { loadConfig } from '../server/config.ts';
+import { iceServersFrom, loadConfig } from '../server/config.ts';
+import { decodeRelayFrame, encodeRelayFrame, isRelayFrame } from '../shared/protocol.ts';
 
 const silent = { info() {}, warn() {}, error() {} };
 
@@ -32,11 +33,17 @@ after(async () => {
 function connect() {
   const socket = new WebSocket(wsUrl);
   const received = [];
+  const binary = [];
   const waiters = [];
   openClients.add({ socket });
 
   socket.on('message', (data, isBinary) => {
-    if (isBinary) return;
+    if (isBinary) {
+      // Program chunks and relayed pictures both arrive as binary.
+      const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      binary.push(buffer);
+      return;
+    }
     const message = JSON.parse(data.toString('utf8'));
     received.push(message);
     for (let index = waiters.length - 1; index >= 0; index -= 1) {
@@ -51,6 +58,7 @@ function connect() {
   const client = {
     socket,
     received,
+    binary,
     open: () =>
       new Promise((resolve, reject) => {
         socket.once('open', resolve);
@@ -236,6 +244,69 @@ test('destinations are stored without echoing the stream key back', async () => 
   assert.equal(removed.removed, added.destination.id);
 
   host.close();
+});
+
+test('the welcome hands every client STUN and TURN, so calls cross networks', async () => {
+  const client = connect();
+  await client.open();
+  const welcome = await client.next((message) => message.type === 'welcome');
+  assert.ok(Array.isArray(welcome.iceServers), 'the welcome carries ICE servers');
+  assert.ok(
+    welcome.iceServers.some((server) => String(server.urls).includes('stun:')),
+    'with a STUN server to find a route',
+  );
+  client.socket.close();
+});
+
+test('a configured TURN server is handed to every client', () => {
+  // STUN alone cannot get through a symmetric NAT or a corporate firewall.
+  const stunOnly = iceServersFrom({ stunUrls: ['stun:example.org:3478'] });
+  assert.deepEqual(stunOnly, [{ urls: ['stun:example.org:3478'] }]);
+
+  const relayed = iceServersFrom({
+    stunUrls: ['stun:example.org:3478'],
+    turnUrls: ['turn:relay.example.org:3478'],
+    turnUsername: 'user',
+    turnCredential: 'secret',
+  });
+  assert.deepEqual(relayed[1], {
+    urls: ['turn:relay.example.org:3478'],
+    username: 'user',
+    credential: 'secret',
+  });
+
+  // And the studio server passes its own list on to the clients.
+  const config = loadConfig({ turnUrls: ['turn:relay.example.org:3478'], turnUsername: 'u', turnCredential: 'p' });
+  assert.ok(config.iceServers.some((server) => String(server.urls).includes('turn:')), 'the config exposes it');
+});
+
+test('a camera picture relayed over the socket reaches the room', async () => {
+  const host = connect();
+  const viewer = connect();
+  await Promise.all([host.open(), viewer.open()]);
+  await host.send('join', { roomId: 'relay-room', name: 'Ada', role: 'host' });
+  await viewer.send('join', { roomId: 'relay-room', name: 'Vic', role: 'viewer' });
+
+  // The viewer cannot reach the host peer to peer, so it posts a picture instead.
+  const picture = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 1, 2, 3]);
+  viewer.socket.send(
+    encodeRelayFrame({ sourceId: 'camera:1', kind: 'camera', label: 'Vic camera', w: 480, h: 270 }, picture),
+  );
+
+  const deadline = Date.now() + 4000;
+  while (!host.binary.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(host.binary.length, 'the room receives the picture');
+  const decoded = decodeRelayFrame(host.binary.at(-1));
+  assert.ok(decoded, 'and it is still a relay frame');
+  assert.equal(decoded.header.sourceId, 'camera:1', 'the source it belongs to travels with it');
+  assert.equal(decoded.header.fromName, 'Vic', 'so does who sent it');
+  assert.deepEqual([...decoded.payload], [...picture], 'and the picture is untouched');
+
+  // The program feed is untouched by all of this: a WebM chunk is still a chunk.
+  assert.equal(isRelayFrame(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x00])), false);
+
+  host.socket.close();
+  viewer.socket.close();
 });
 
 test('program feeds are only accepted from the active publisher', async () => {
