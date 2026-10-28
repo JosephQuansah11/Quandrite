@@ -104,6 +104,14 @@ export class Studio extends EventEmitter {
    * decision about a person is - see `rememberMute`.
    */
   mutedNames: Set<string>;
+  /**
+   * Names (lower-cased) with a hand raised.
+   *
+   * A raised hand is a state, so it is remembered the same way a mute is: a person who
+   * reloads comes back with their hand still up, rather than losing their place in the
+   * queue because their browser blinked.
+   */
+  handNames: Set<string>;
   /** Private conversations, keyed by `privateThreadKey`. */
   privateChats: Map<string, ChatMessage[]>;
   sources: Map<string, Source>;
@@ -156,6 +164,9 @@ export class Studio extends EventEmitter {
     // hold if they close the tab and come back. "Mute all" is a sweep, not a policy, so
     // it is not remembered here.
     this.mutedNames = new Set();
+    // Hands up, by name, for the same reason a mute is: it is a state about a person, not
+    // about the moment they happened to be in the room.
+    this.handNames = new Set();
     this.chat = [];
     /**
      * Private conversations, keyed by the pair of members in them. They are never part of
@@ -293,6 +304,8 @@ export class Studio extends EventEmitter {
       muted: this.mutedNames.has(nameKey(memberName)),
       cameraEnabled: false,
       screenSharing: false,
+      // ...and so does somebody who had their hand up when they reloaded.
+      handRaised: this.handNames.has(nameKey(memberName)),
       speaking: false,
       sourceIds: [],
       breakoutId: null,
@@ -375,6 +388,7 @@ export class Studio extends EventEmitter {
     if (patch.muted !== undefined) member.muted = Boolean(patch.muted);
     if (patch.cameraEnabled !== undefined) member.cameraEnabled = Boolean(patch.cameraEnabled);
     if (patch.screenSharing !== undefined) member.screenSharing = Boolean(patch.screenSharing);
+    if (patch.handRaised !== undefined) member.handRaised = Boolean(patch.handRaised);
     if (patch.speaking !== undefined) member.speaking = Boolean(patch.speaking);
     if (patch.name !== undefined) member.name = cleanText(patch.name, MAX_MEMBER_NAME) || member.name;
     this.emit('members', this.membersSnapshot());
@@ -398,6 +412,23 @@ export class Studio extends EventEmitter {
     if (!key) return false;
     if (muted) this.mutedNames.add(key);
     else this.mutedNames.delete(key);
+    return true;
+  }
+
+  /**
+   * Remember - or forget - that a person has their hand up.
+   *
+   * The same note-taking as `rememberMute`, for the same reason: a hand is a state about a
+   * person, and a reload should not quietly take it down. Nobody is stuck with it either -
+   * the hand is the person's own to lower.
+   */
+  rememberHand(clientId, raised) {
+    const member = this.members.get(clientId);
+    if (!member) return false;
+    const key = nameKey(member.name);
+    if (!key) return false;
+    if (raised) this.handNames.add(key);
+    else this.handNames.delete(key);
     return true;
   }
 

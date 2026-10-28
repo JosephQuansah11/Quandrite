@@ -1160,3 +1160,93 @@ test('a host mute of one person survives their reload, and a sweep does not', as
   third.close();
   fourth.close();
 });
+
+test('a reaction reaches the room, and a hand is a state the room keeps', async () => {
+  const host = connect();
+  const guest = connect();
+  const other = connect();
+  await Promise.all([host.open(), guest.open(), other.open()]);
+  await host.send('join', { roomId: 'react-room', name: 'Ada', role: 'host' });
+  const guestJoin = await guest.send('join', { roomId: 'react-room', name: 'Bob' });
+  await other.send('join', { roomId: 'react-room', name: 'Cleo' });
+
+  // A burst: it goes to the room, with who sent it, and it is not a state - the roster
+  // does not change.
+  const clap = await guest.send('reaction:send', { kind: 'clap' });
+  assert.equal(clap.reaction.kind, 'clap', 'the ack carries the reaction');
+  assert.equal(clap.reaction.from, guestJoin.clientId, 'and who sent it');
+  assert.equal(clap.reaction.fromName, 'Bob', 'with the name the room knows');
+  const heard = await host.next(
+    (message) => message.type === 'reaction:new' && message.payload.kind === 'clap',
+  );
+  assert.equal(heard.payload.from, guestJoin.clientId, 'the room hears the clap');
+  const alsoHeard = await other.next(
+    (message) => message.type === 'reaction:new' && message.payload.kind === 'clap',
+  );
+  assert.equal(alsoHeard.payload.from, guestJoin.clientId, 'and so does everybody else in it');
+
+  // A hand is a state: it goes into the roster, which is what paints the tile, the list
+  // and the pill on every client - and it is the same in a breakout's own roster.
+  await guest.send('reaction:send', { kind: 'hand', on: true });
+  const raised = await host.next(
+    (message) =>
+      message.type === 'members:update' &&
+      message.payload.some((member) => member.id === guestJoin.clientId && member.handRaised),
+  );
+  assert.equal(
+    raised.payload.find((member) => member.id === guestJoin.clientId).handRaised,
+    true,
+    'a raised hand is part of the roster',
+  );
+  const handEvent = await host.next(
+    (message) => message.type === 'reaction:new' && message.payload.kind === 'hand',
+  );
+  assert.equal(handEvent.payload.on, true, 'and the event says which way it went');
+
+  // The hand is the person's own to lower.
+  await guest.send('reaction:send', { kind: 'hand', on: false });
+  const lowered = await host.next(
+    (message) =>
+      message.type === 'members:update' &&
+      message.payload.some((member) => member.id === guestJoin.clientId && !member.handRaised),
+  );
+  assert.equal(
+    lowered.payload.find((member) => member.id === guestJoin.clientId).handRaised,
+    false,
+    'and it comes down again',
+  );
+
+  // A hand survives a reload, like a mute: the room remembers the name, not the socket.
+  await guest.send('reaction:send', { kind: 'hand', on: true });
+  guest.close();
+  const back = connect();
+  await back.open();
+  const rejoin = await back.send('join', { roomId: 'react-room', name: 'bob' });
+  assert.equal(
+    rejoin.snapshot.members.find((member) => member.id === rejoin.clientId).handRaised,
+    true,
+    'and it is still up after a reload',
+  );
+
+  // Reactions are the chattiest thing in the protocol: a burst is allowed, and the ack
+  // says when one was dropped rather than leaving the client waiting for an answer.
+  const bursts = [];
+  for (let index = 0; index < 12; index += 1) bursts.push(host.send('reaction:send', { kind: 'thumb' }));
+  const results = await Promise.all(bursts);
+  assert.ok(results.some((result) => result.reaction), 'a burst of reactions goes through');
+  assert.ok(results.some((result) => result.throttled), 'and the rest are dropped, not refused');
+
+  // An unknown reaction is refused outright.
+  await assert.rejects(() => host.send('reaction:send', { kind: 'party' }), /unsupported reaction/);
+
+  // ...and a reaction needs a room to be in.
+  const stranger = connect();
+  await stranger.open();
+  await assert.rejects(() => stranger.send('reaction:send', { kind: 'smile' }), /join a room first/);
+
+  host.close();
+  back.close();
+  other.close();
+  stranger.close();
+});
+

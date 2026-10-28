@@ -26,6 +26,8 @@ browser compositor ──WebM──▶ WebSocket ──▶ ffmpeg (encode once) 
 | Record the video for later | The recording is a `tee` slave of the same encode - no second encode, no extra CPU (`server/studio.js`) |
 | Several cameras on one machine | The `Cameras & screens` pop-up lists every camera and microphone with a tick box and sends the selection to the studio, the grid or straight on air (`public/js/app.js`, `public/js/devices.js`) |
 | People view like Zoom | Every row in the *People* tab has mic and camera controls: your own switch your media, the host's also mute and stop video for anyone, plus *Mute all* / *Stop all video* (`server/signaling.js`) |
+| Your own settings | One screen for devices (with a check that publishes nothing), how joining behaves, how the room is shown to me, the broadcast defaults, notifications and a live diagnostics readout (`public/index.html`, `public/js/app.ts`) |
+| Reactions like Zoom | Raise your hand (a state, in the roster) plus animated smile/clap/thumbs-up/cheer bursts that float over the stage with the name of whoever sent them (`shared/protocol.ts`, `public/js/app.ts`) |
 | Cameras connected over Bluetooth | Web Bluetooth pairing assist, then a poll for the newly exposed camera and automatic attach of it (see note below) |
 | Everyone can see who joined | The *People* tab lists host, co-hosts, viewers and visitors with roles and per-person host actions (`public/js/app.js`) |
 | Roles protected by passwords | Host and co-host seats are claimed with a room password; the host grants co-hosts without one and can rotate the passwords (`server/studio.js`) |
@@ -241,6 +243,48 @@ room code is checked as you type). Once a host has been assigned the offer
 disappears from the landing page: the password lives inside the room, in the
 *People* tab, where the host can read it, share it and **change it** at any time.
 
+### My settings: one screen of my own
+
+The **Settings** button in the top bar opens a screen that is *mine* rather than the
+room's - it is reachable before joining, reachable in a call, and nothing on it asks the
+room for anything or changes what anybody else sees. It is one of the screens, so it
+stands in front of the landing page or the room while it is open and **Done** gives that
+back (the same `updateJoinControls()` that decides which screen is showing).
+
+| section | what it sets |
+| --- | --- |
+| **You** | the name and the role the join form starts on (the URL still wins - a link somebody sent you is about *that* room) |
+| **Devices** | which microphone, camera and speaker to use, plus a **check** that opens them, previews the camera and lights a level bar - publishing nothing |
+| **When I join** | whether *Join call* turns the microphone on, and whether it turns the camera on |
+| **In the room** | the main view (Program / People / Split), how the people are shown (Slide / Grid / List), the two panes, and whether my own picture is mirrored |
+| **Broadcast** | the host's defaults for the Go live tab: the video-quality preset and *record this broadcast* |
+| **Notifications** | the same switch the bell on the meeting bar uses, with what the browser will actually do about it |
+| **This client** | a live readout of what the client is doing, **Copy diagnostics**, and **Reset my settings** |
+
+Three rules keep it honest:
+
+- **One key, and no second copy of the truth.** The preferences this screen owns live in
+  `localStorage.quandrite.settings`; the ones that already had a key of their own - the
+  panes (`quandrite.panes`), the people view (`quandrite.peopleView`), the stage view
+  (`quandrite.stageView`), the mirror (`quandrite.selfMirror`) and the bell
+  (`quandrite.notify`) - are read and written **through the same setters the rest of the
+  app uses**, so the room bar and the settings screen can never disagree about what the
+  view is.
+- **The devices are the ones the client captures with.** The chosen microphone is what
+  unmuting opens (`ensureMicrophone()` passes `deviceId`), the chosen camera is what the
+  pre-join toggle opens, and the chosen speaker is applied to *both* audio contexts - the
+  room mixer (`RoomAudio.setOutputDevice`) and the relayed voice
+  (`setRelayedAudioOutputDevice`) - where the browser can (`setSinkId`; Safari follows the
+  system, and the picker says so instead of pretending).
+- **The check publishes nothing.** Its streams belong to the screen: they are opened from
+  `getUserMedia` directly rather than through the camera manager, they are never
+  announced as a source, and they are stopped - with the analyser's own context - the
+  moment the check stops or the screen closes.
+
+**Reset my settings** clears every `quandrite.*` key and puts the defaults back **live**,
+through the same setters: the panes, the views, the mirror and the bell all go back to
+their defaults without a reload, because the room is not mine to throw away.
+
 ### How the room is shown
 
 The *In this room* strip has three views, switchable in its head:
@@ -280,6 +324,36 @@ The *In this room* strip has three views, switchable in its head:
   clicking a tile puts that source straight on air. It only renders while you
   hold a control role and the pane is open - viewers and visitors never get one.
 
+### Reactions: a hand, a smile, a clap
+
+A meeting needs to be able to react without unmuting, and there are two kinds of reaction
+in Quandrite because they behave differently:
+
+| | how it behaves | where it shows |
+| --- | --- | --- |
+| **Raise your hand** | a **state**: it stays up until the person lowers it, survives a reload (remembered by name, like a mute) | the **top-bar pill** for the person who raised it (click to lower), a **waving ✋ on their tile**, and `hand raised` in the People list and the Meeting tab |
+| **😄 👍 👏 🎉** | a **burst**: a moment, never remembered | an **animated icon floating up over the stage** with the name of whoever sent it, plus a ping on their tile |
+
+- **One picker, one catalogue.** The **React** button on the meeting bar opens a picker
+  built from `REACTION_KINDS` / `REACTION_LABELS` / `REACTION_GLYPHS` in
+  `shared/protocol.ts`, so the picker, the tiles and the server cannot disagree about what
+  a clap is (and the markup stays free of emoji). Escape or a click elsewhere closes it.
+- **The animation is the feature.** A burst **rises, sways and fades** (`@keyframes
+  reaction-rise` + `reaction-sway`), lands over the sender's own tile when that tile is on
+  screen - otherwise in a lane of its own, chosen from the sender so two people clapping do
+  not stack - and **removes itself** when the animation ends, with a timeout as a backstop.
+  A raised hand **waves** (`@keyframes hand-wave`) wherever it is drawn: tile, roster, pill.
+  `prefers-reduced-motion` gets the reaction without the travel.
+- **My own burst is instant.** It is shown the moment I press it and the server's copy is
+  skipped, so nobody sees their own clap twice; a hand is a state, so it waits for the
+  roster (which is what everybody else is reading anyway).
+- **Reactions are rate-limited, not refused.** A round of applause is a dozen messages in a
+  second, so the server allows a small burst and drops the rest with `{ throttled: true }`
+  in the ack - a dropped clap is invisible, while an error toast in the middle of a
+  celebration is not. Only the five known kinds are accepted.
+- **A hand belongs to the room's roster, and a reaction to the room you are in**: a
+  breakout has its own applause, and nothing about it reaches the parent room.
+
 ### Announcements with a countdown
 
 The *Announcement* scene takes a **countdown** as well as a message and a
@@ -318,6 +392,17 @@ Publishing and placement are immediate, never a two-step:
   becomes **Stop sharing** while a share is running, so pressing it again ends it instead
   of opening a second. Ending it stops the capture, which is also what takes the browser's
   own "stop sharing" bar away - nobody has to remember to tidy up.
+- **And a share says so.** Sharing is invisible by itself - the screen goes to the program
+  and to the studio's preview, and your own tile stays your camera - so it is said three
+  times from one state (`myScreenSource()`, so the three can never disagree): a
+  **`sharing my screen` pill in the top bar**, which is visible from anywhere in the app
+  (the landing page, a call, the settings screen) and **ends the share when it is clicked**,
+  the way the breakout pill leaves a breakout; a **banner over the stage**, bottom-left,
+  with the **thumbnail of the screen the room is actually seeing** and a **Stop sharing**
+  button; and the meeting bar's **Share button, whose label reads the state**
+  (`Share` / `Sharing`) like the microphone and camera icons do. Someone *else* sharing
+  says so on their own tile, with the `sharing screen` badge - which steps down under the
+  `on air` badge when they are on the program too.
 - `Add to studio` / `Add to grid` / `Put on air` in the **Cameras & screens**
   pane act on the ticked devices - or, if nothing is ticked, on what is already
   published (or the first camera) - then close the pane so the program preview
@@ -1262,7 +1347,9 @@ Client to server: `join` (with an optional `password` for the host/co-host
 seats), `leave`, `ping`, `chat:send`, `member:update` (your own mic/camera state),
 `member:role` (host only: grant, revoke or hand over a role), `member:media`
 (host and co-hosts: mute or stop video for one member, or `all: true` for
-everyone else), `room:update` (host only: rotate the passwords),
+everyone else), `reaction:send` (`kind` = `hand` | `smile` | `thumb` | `clap` |
+`congrats`, with `on` for the hand; rate-limited with a small burst allowance),
+`room:update` (host only: rotate the passwords),
 `breakout:create`, `breakout:assign`, `breakout:rename`, `breakout:shuffle`, `breakout:open`,
 `breakout:close`, `breakout:clear`, `breakout:announce` (host and co-hosts run the
 breakout rooms and rename them; anyone may move themselves into an open one or back to the
@@ -1274,6 +1361,8 @@ main room), `source:add`, `source:update` (your own sources, including
 
 Server to client: `welcome`, `ack`, `error`, `pong`, `chat:new`,
 `members:update`, `member:media` (your mic or camera was switched for you),
+`reaction:new` (somebody reacted - a burst, or a hand going up or down, sent to the room
+the sender is standing in),
 `breakouts:update` (the breakout catalogue, sent to the main
 room and every breakout), `breakout:update` (this client moved rooms, with the
 roster, the catalogue, the chat of the room it entered and the studio state),

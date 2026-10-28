@@ -75,6 +75,9 @@
   background: rgba(220, 38, 38, .92); color: #fff;
   box-shadow: 0 2px 8px rgba(0, 0, 0, .45);
 }
+/* Whoever is sharing their screen says so on their own tile - and when they are also on
+   air the share badge steps down rather than sitting on top of the on-air one. */
+.room-tile .badge-air ~ .badge-share { top: 34px; }
 .room-tile {
   position: relative;
   border: 2px solid transparent;
@@ -170,11 +173,93 @@
 
 /* The bottom bar: the things you actually do during a meeting. */
 .room-toolbar {
+  position: relative;
   justify-self: center;
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   padding: 8px 12px; border-radius: 999px;
   background: rgba(10, 16, 30, .92); border: 1px solid var(--line);
   box-shadow: 0 12px 34px rgba(0, 0, 0, .45);
+}
+
+/* --------------------------------------------------------------- reactions */
+/* The picker, just above the bar it belongs to. */
+.reaction-picker {
+  position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%);
+  z-index: 6; display: flex; gap: 4px; padding: 8px;
+  border-radius: 14px; border: 1px solid var(--line);
+  background: rgba(9, 15, 30, .97); box-shadow: 0 18px 40px rgba(0, 0, 0, .55);
+}
+.reaction-choice {
+  display: grid; place-items: center; gap: 2px;
+  width: 68px; padding: 6px 4px; border-radius: 10px;
+  background: transparent; border: 1px solid transparent; cursor: pointer;
+}
+.reaction-choice:hover,
+.reaction-choice:focus-visible { background: #16233c; border-color: var(--accent); }
+/* My own hand is up: the button says so rather than only being pressable. */
+.reaction-choice.on { background: #2a3a5e; border-color: var(--accent); color: #bae6fd; }
+.reaction-choice .reaction-glyph { font-size: 22px; line-height: 1.1; }
+.reaction-choice span { font-size: 10.5px; color: var(--muted); text-align: center; }
+.reaction-choice.on span { color: #bae6fd; }
+
+/* Where reactions float: over the picture, above the bar, and out of the way of clicks. */
+.reaction-layer {
+  position: absolute; inset: 0; z-index: 5;
+  pointer-events: none; overflow: hidden;
+}
+.reaction-float {
+  position: absolute; bottom: 8%;
+  display: grid; justify-items: center; gap: 2px;
+  animation: reaction-rise 2.6s cubic-bezier(.22, .61, .36, 1) forwards;
+}
+.reaction-float .reaction-glyph {
+  display: block; font-size: 38px; line-height: 1;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, .55));
+  /* The sway is what makes it read as a reaction rather than a sticker: the icon moves
+     while it rises, and every reaction gets the same gentle rock. */
+  animation: reaction-sway 1.1s ease-in-out infinite alternate;
+}
+.reaction-float .reaction-who {
+  font-size: 11px; font-weight: 600; color: #eaf2ff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .85);
+}
+/* A clap is wider than a smile: the two-handed ones get a little more room to rock. */
+.reaction-float.reaction-clap .reaction-glyph,
+.reaction-float.reaction-congrats .reaction-glyph { animation-duration: .8s; }
+
+@keyframes reaction-rise {
+  0% { transform: translateY(0) scale(.5); opacity: 0; }
+  12% { transform: translateY(-4%) scale(1.18); opacity: 1; }
+  55% { transform: translateY(-52%) scale(1); opacity: 1; }
+  100% { transform: translateY(-104%) scale(.92); opacity: 0; }
+}
+@keyframes reaction-sway {
+  from { transform: rotate(-9deg) translateX(-3px); }
+  to { transform: rotate(9deg) translateX(3px); }
+}
+/* The reduced-motion version: it arrives and leaves without travelling. */
+@keyframes reaction-fade {
+  0% { opacity: 0; }
+  10% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+/* The wave on a raised hand, wherever it is shown: the tile badge, the roster, the pill. */
+.hand-glyph { display: inline-block; animation: hand-wave 1.6s ease-in-out infinite; transform-origin: 70% 80%; }
+@keyframes hand-wave {
+  0%, 60%, 100% { transform: rotate(0deg); }
+  15% { transform: rotate(14deg); }
+  30% { transform: rotate(-6deg); }
+  45% { transform: rotate(10deg); }
+}
+.room-tile .name .pill-badge.hand { background: rgba(245, 158, 11, .22); color: #fcd34d; }
+.pill.hand { background: rgba(245, 158, 11, .18); border-color: #f59e0b; color: #fcd34d; }
+
+/* Respecting reduced motion: the reaction still arrives, it just does not travel. */
+@media (prefers-reduced-motion: reduce) {
+  .reaction-float { animation: reaction-fade 2.6s ease-out forwards; }
+  .reaction-float .reaction-glyph,
+  .hand-glyph { animation: none; }
 }
 .room-tool {
   display: inline-flex; align-items: center; gap: 6px;
@@ -265,6 +350,27 @@
 .share-dialog-head button, .chat-dialog-head button { margin-left: auto; }
 .share-dialog .device-picker { max-height: 46vh; overflow: auto; }
 
+/* What I am sharing, over the stage: the thumbnail of what the room is seeing, and the way
+   out of it. Bottom-left, opposite my own picture, so it clears the program's own bar at
+   the top of the stage and the banners that belong there. */
+.screen-share-banner {
+  position: absolute; left: 10px; bottom: 68px; z-index: 4;
+  display: flex; align-items: center; gap: 10px;
+  max-width: min(420px, 62vw);
+  padding: 8px 10px; border-radius: 12px;
+  background: rgba(8, 14, 28, .94); border: 1px solid var(--accent);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .5);
+}
+.screen-share-preview {
+  width: 96px; aspect-ratio: 16 / 9; object-fit: cover; flex: none;
+  border-radius: 8px; border: 1px solid var(--line); background: #0b1225;
+}
+.screen-share-body { display: grid; gap: 2px; min-width: 0; }
+.screen-share-title { font-size: 12.5px; }
+.screen-share-body .muted {
+  font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* Feedback: said out loud, and undone when it stops. */
 .feedback-banner {
   position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
@@ -283,6 +389,9 @@
   .room-tool .room-tool-label { font-size: 12px; }
   /* The bar wraps to two lines on a phone, so the self view clears that too. */
   .self-view { width: 30vw; bottom: 112px; }
+  /* ...and the sharing banner sits above it, the width of the stage. */
+  .screen-share-banner { left: 8px; right: 8px; bottom: 112px; max-width: none; }
+  .screen-share-preview { width: 72px; }
   /* On a phone there is no room beside the stage, so the studio docks under it and the
      stage keeps the top half: still visible, never covered. */
   .room.studio-open {
@@ -401,6 +510,17 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 .share-button:hover { background: rgba(56, 189, 248, .24); }
 .share-button svg { display: block; }
 
+/* My own settings: not a room action, so it is quiet rather than the Share button's
+   accent - but it is always there, in a room or on the landing page. */
+.settings-button {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: transparent; border-color: var(--line); color: var(--muted);
+  font-weight: 600;
+}
+.settings-button:hover { background: #1d2c4a; color: var(--text); }
+.settings-button svg { display: block; }
+.settings-button[aria-expanded='true'] { background: #1d2c4a; color: var(--text); border-color: var(--accent); }
+
 /* Who I am and where I am: the only identity the top bar carries. */
 .who { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .leave-button {
@@ -426,6 +546,58 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 .landing-card .form select { width: 100%; }
 .landing-card small { font-size: 11px; }
 #join-status:empty { display: none; }
+
+/* --------------------------------------- the settings screen (mine, not the room's) */
+/* One screen of its own, like the landing page: the gear in the top bar opens it and
+   "Done" gives the room back. It is wider than the landing card because it carries a
+   readout as well as a form. */
+.settings-card { width: min(760px, 96vw); gap: 10px; }
+.settings-head { display: flex; align-items: center; gap: 10px; }
+.settings-head h1 { font-size: 18px; }
+.settings-head span { font-size: 11.5px; }
+.settings-head button { margin-left: auto; }
+.settings-group {
+  display: grid; gap: 8px;
+  padding: 12px 14px; border-radius: 12px;
+  background: rgba(10, 17, 32, .6); border: 1px solid var(--line);
+}
+.settings-group h2 { font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.settings-group p { font-size: 11.5px; }
+.settings-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.settings-grid label { margin: 0; }
+.settings-panes { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.settings-panes .toggle { font-size: 12px; }
+/* The device check: what the chosen camera and microphone are doing, published nowhere. */
+.settings-check {
+  display: grid; gap: 10px; align-items: center;
+  grid-template-columns: minmax(0, 220px) minmax(0, 1fr);
+}
+.settings-check-body { display: grid; gap: 8px; }
+.settings-preview {
+  width: 100%; aspect-ratio: 16 / 9; object-fit: cover;
+  border-radius: 10px; border: 1px solid var(--line); background: #0b1225;
+  transform: scaleX(-1);
+}
+.settings-preview[hidden] { display: none; }
+/* Twelve bars, lit from the left by the microphone's own level. */
+.settings-level { display: flex; align-items: flex-end; gap: 3px; height: 26px; }
+.settings-level i {
+  flex: 1; height: 100%; border-radius: 3px;
+  background: #1b2740; border: 1px solid var(--line);
+  transition: background .08s linear;
+}
+.settings-level i.on { background: linear-gradient(180deg, #34d399, #22c55e); border-color: #22c55e; }
+/* What this client is doing: a plain two-column readout. */
+.settings-readout {
+  display: grid; gap: 4px 12px; margin: 0; font-size: 12px;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+}
+.settings-readout dt { color: var(--muted); }
+.settings-readout dd { margin: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  .settings-check { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* The pre-join row: my microphone, my camera and the way into the call, on the same line
    as the form that says who I am. */
@@ -461,6 +633,11 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 .pill.role-cohost { background: rgba(168, 85, 247, .16); border-color: var(--accent-2); color: #e9d5ff; }
 .pill.role-viewer { background: rgba(148, 163, 184, .12); }
 .pill.role-visitor { background: rgba(148, 163, 184, .12); color: #a8b5d1; }
+/* What I am publishing: the accent, because it is a thing I am doing rather than a state
+   of the connection - and it is a button (the breakout pill's own pattern). */
+.pill.sharing { background: rgba(56, 189, 248, .18); border-color: var(--accent); color: #bae6fd; }
+.pill.clickable { cursor: pointer; }
+.pill.clickable:hover { filter: brightness(1.2); }
 
 .join-form #join-password { flex: 0 1 160px; }
 .join-form input:disabled { opacity: .5; }

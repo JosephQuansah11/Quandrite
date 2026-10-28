@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { CHAT_ATTACHMENT_TYPES, CLIENT, MAX_CHAT_ATTACHMENT_BYTES, SERVER, PROTOCOL_VERSION, RELAY_AUDIO_BURST, RELAY_AUDIO_MAX_FPS, RELAY_MAX_FPS, RELAY_WARM_FRAMES, RELAY_WARM_MAX_AGE_MS, canControlBroadcast, decodeRelayFrame, encodeRelayFrame, isRelayFrame, monotonicNs, nsToWire, validateEnvelope } from '../shared/protocol.ts';
+import { CHAT_ATTACHMENT_TYPES, CLIENT, MAX_CHAT_ATTACHMENT_BYTES, SERVER, PROTOCOL_VERSION, REACTION_BURST, REACTION_KINDS, REACTION_MAX_PER_SECOND, REACTION_STATES, RELAY_AUDIO_BURST, RELAY_AUDIO_MAX_FPS, RELAY_MAX_FPS, RELAY_WARM_FRAMES, RELAY_WARM_MAX_AGE_MS, canControlBroadcast, decodeRelayFrame, encodeRelayFrame, isRelayFrame, monotonicNs, nsToWire, validateEnvelope } from '../shared/protocol.ts';
 import { OVERLAY_DEFINITIONS, REQUESTABLE_OVERLAY_TYPES } from '../shared/overlays.ts';
 import { listPlatforms } from '../shared/destinations.ts';
 
@@ -918,6 +918,59 @@ export class SignalingServer {
         }
         if (!changed) return this._fail(session, id, 'member not found');
         this._ack(session, id, { changed });
+        return undefined;
+      }
+      /**
+       * A reaction: a hand going up, or a burst of applause.
+       *
+       * It goes to **the room the sender is standing in** - a breakout has its own
+       * conversation and its own applause - and a raised hand is a *state*, so it is
+       * written into the roster as well. That is what makes a hand survive a reload, show
+       * on the person's tile for everybody, and stay up until they lower it.
+       *
+       * Reactions are the chattiest thing in this protocol: a round of applause is a dozen
+       * of them in a second. So they are **rate-limited rather than refused**, with a small
+       * burst allowance - a dropped clap is invisible, while an error toast in the middle
+       * of a celebration is not. The ack says when a reaction was dropped, so a client
+       * never sits waiting for one.
+       */
+      case CLIENT.REACTION: {
+        if (!this._requireRoom(session, id)) return undefined;
+        const kind = String(message.kind || '');
+        if (!REACTION_KINDS.includes(kind)) return this._fail(session, id, `unsupported reaction: ${kind}`);
+
+        const now = Date.now();
+        const bucket = session.reactionTokens || (session.reactionTokens = { tokens: REACTION_BURST, at: now });
+        bucket.tokens = Math.min(
+          REACTION_BURST,
+          bucket.tokens + ((now - bucket.at) / 1000) * REACTION_MAX_PER_SECOND,
+        );
+        bucket.at = now;
+        if (bucket.tokens < 1) {
+          this._ack(session, id, { throttled: true });
+          return undefined;
+        }
+        bucket.tokens -= 1;
+
+        const studio = session.studio;
+        const reaction: any = {
+          id: `${session.id}-${now.toString(36)}`,
+          kind,
+          from: session.id,
+          fromName: session.name,
+          at: now,
+        };
+        if (REACTION_STATES.includes(kind)) {
+          // A hand: the roster is the state, and the note makes it survive a reload. The
+          // person may raise or lower it; `on` is what a client that knows the answer sends.
+          const raised =
+            message.on === undefined ? !studio.getMember(session.id)?.handRaised : Boolean(message.on);
+          studio.updateMember(session.id, { handRaised: raised });
+          studio.rememberHand(session.id, raised);
+          reaction.on = raised;
+        }
+        this._broadcast(session.attendedRoomId || studio.id, { type: SERVER.REACTION, payload: reaction });
+        this._ack(session, id, { reaction });
         return undefined;
       }
       case CLIENT.SOURCE_ADD: {

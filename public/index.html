@@ -22,9 +22,9 @@
         </div>
       </div>
 
-      <!-- Only the essentials stay up here: who you are, where you are, your
-           state, and the way out. Everything else lives on the landing page or
-           inside a collapsible pane. -->
+      <!-- Only the essentials stay up here: who you are, where you are, your state, my own
+           settings, and the way out. Everything else lives on the landing page or inside a
+           collapsible pane. -->
       <div class="who" id="who">
         <span id="name-pill" class="pill">not joined</span>
         <span id="room-pill" class="pill">no room</span>
@@ -36,6 +36,13 @@
         <!-- Where I am. In a breakout it is a button: leaving is one click, from the bar
              as well as from the banner over the stage. -->
         <button type="button" id="breakout-pill" class="pill hidden">main room</button>
+        <!-- What I am publishing. A screen share is a state, so it is said where the other
+             states are said - and it is a button, like the breakout pill: one click ends
+             the share from anywhere in the app. -->
+        <button type="button" id="sharing-pill" class="pill hidden" title="You are sharing your screen - click to stop">sharing my screen</button>
+        <!-- A raised hand is a state too: it stays up until I lower it, so it is said here
+             with the other states, and clicking it takes it down. -->
+        <button type="button" id="hand-pill" class="pill hidden" title="Your hand is up - click to lower it">hand raised</button>
         <span id="live-pill" class="pill">off air</span>
         <span id="rec-pill" class="pill">not recording</span>
       </div>
@@ -435,6 +442,12 @@
           <button type="button" id="btn-room-more" class="room-tool" data-requires="control" title="More studio tools">
             <span class="room-tool-label">&hellip;</span>
           </button>
+          <!-- Reactions: a hand, a smile, a clap. The picker is built from the shared
+               catalogue, so the glyphs and the names live in one place. -->
+          <button type="button" id="btn-room-reactions" class="room-tool" aria-haspopup="true" aria-expanded="false" title="React - raise your hand, smile, clap">
+            <span class="room-tool-label">React</span>
+          </button>
+          <div id="reaction-picker" class="reaction-picker hidden" role="menu" aria-label="Reactions"></div>
           <!-- Breakout rooms are always on the bar: a room is somewhere to go, so the way
                in is visible to everyone rather than appearing once a host has made one. -->
           <button type="button" id="btn-room-breakout" class="room-tool" title="Breakout rooms - see them and pick one to join">
@@ -485,6 +498,23 @@
              scream: the mixer ducks it and turns it back up when it stops. -->
         <div id="feedback-banner" class="feedback-banner hidden">
           <span id="feedback-banner-text">Feedback detected - audio ducked</span>
+        </div>
+
+        <!-- Where reactions float: over the picture and above the bar, never in the way of
+             a click. Each one removes itself when its animation is done. -->
+        <div id="reaction-layer" class="reaction-layer" aria-live="polite" aria-label="Reactions"></div>
+
+        <!-- What I am sharing, over the stage where the sharing happens: the thumbnail is
+             the screen the room is seeing, and the button ends the share from here. It sits
+             at the bottom of the stage, opposite my own picture, so it is clear of the
+             program's own bar above and of the banners that belong at the top. -->
+        <div id="screen-share-banner" class="screen-share-banner hidden">
+          <video id="screen-share-preview" class="screen-share-preview" autoplay playsinline muted></video>
+          <div class="screen-share-body">
+            <strong class="screen-share-title">You are sharing your screen</strong>
+            <span id="screen-share-note" class="muted">the room can see it</span>
+          </div>
+          <button type="button" id="btn-stop-sharing" class="tiny danger" title="Stop sharing your screen with the room">Stop sharing</button>
         </div>
       </section>
 

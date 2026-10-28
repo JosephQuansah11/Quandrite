@@ -19,6 +19,7 @@ export const CLIENT = Object.freeze({
   MEMBER_UPDATE: 'member:update',
   MEMBER_ROLE: 'member:role',
   MEMBER_MEDIA: 'member:media',
+  REACTION: 'reaction:send',
   ROOM_UPDATE: 'room:update',
   BREAKOUT_CREATE: 'breakout:create',
   BREAKOUT_ASSIGN: 'breakout:assign',
@@ -55,6 +56,14 @@ export const SERVER = Object.freeze({
   CHAT_HISTORY: 'chat:history',
   MEMBERS_UPDATE: 'members:update',
   MEMBER_MEDIA: 'member:media',
+  /**
+   * Somebody reacted: a hand went up, or a burst went off.
+   *
+   * It goes to the room the sender is standing in - a breakout has its own conversation
+   * and its own applause - and a raised hand *also* travels in `members:update`, because
+   * a hand is a state that belongs in the roster rather than an event that flashes by.
+   */
+  REACTION: 'reaction:new',
   BREAKOUTS_UPDATE: 'breakouts:update',
   BREAKOUT_UPDATE: 'breakout:update',
   /**
@@ -104,6 +113,54 @@ export const SOURCE_KINDS = Object.freeze(['camera', 'screen', 'audio', 'virtual
  * `grid` = "put me in the multi-camera grid", `air` = "put me on the program".
  */
 export const SOURCE_REQUESTS = Object.freeze(['grid', 'air']);
+
+/**
+ * The reactions a meeting has.
+ *
+ * Two kinds live here, and the difference matters:
+ *
+ *  - **`hand` is a state.** A raised hand stays up until it is lowered (by the person who
+ *    raised it), and it belongs in the roster next to `muted` and `cameraEnabled` - so it
+ *    survives a reload, shows on the person's tile, and a host can see at a glance who is
+ *    waiting to speak.
+ *  - **The other four are a burst.** A clap, a cheer or a thumbs up is a moment: it is
+ *    shown for a couple of seconds and gone, and it is never part of the roster.
+ */
+export const REACTION_KINDS = Object.freeze(['hand', 'smile', 'thumb', 'clap', 'congrats']);
+
+/** The reactions that are a state rather than a burst. */
+export const REACTION_STATES = Object.freeze(['hand']);
+
+/** How a reaction is named, where a label is needed rather than the glyph. */
+export const REACTION_LABELS: Record<string, string> = Object.freeze({
+  hand: 'Raise your hand',
+  smile: 'Smile',
+  thumb: 'Thumbs up',
+  clap: 'Clap',
+  congrats: 'Congratulations',
+});
+
+/**
+ * The glyphs, in one place, so both ends and every screen agree on what a clap looks like.
+ *
+ * Emoji, deliberately. The microphone and camera icons are vectors because they are
+ * *chrome* - they have to look the same everywhere and be tinted by the button they sit
+ * in. A reaction is the opposite: it is a face, and every platform already draws these far
+ * better than a path could.
+ */
+export const REACTION_GLYPHS: Record<string, string> = Object.freeze({
+  hand: '\u270b',
+  smile: '\u{1f604}',
+  thumb: '\u{1f44d}',
+  clap: '\u{1f44f}',
+  congrats: '\u{1f389}',
+});
+
+/** How many reactions a client may send per second, and how many may arrive at once. */
+export const REACTION_MAX_PER_SECOND = 6;
+export const REACTION_BURST = 4;
+/** How long a burst reaction is on screen: the client's own animation, in milliseconds. */
+export const REACTION_SHOW_MS = 2600;
 
 /**
  * Participant roles.
@@ -466,6 +523,13 @@ export interface Member {
   muted: boolean;
   cameraEnabled: boolean;
   screenSharing: boolean;
+  /**
+   * A raised hand.
+   *
+   * A state, not an event: it stays up until the person who raised it lowers it, so it is
+   * part of the roster (and survives a reload, like a mute).
+   */
+  handRaised: boolean;
   speaking: boolean;
   sourceIds: string[];
   /** The breakout room the member is assigned to, `null` for the main room. */

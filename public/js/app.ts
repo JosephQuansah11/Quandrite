@@ -14,12 +14,15 @@ import { MeetingMesh } from './webrtc.js';
 import { MediaRelay } from './relay.js';
 import { ladderIndexForNetwork } from './quality.js';
 import { RoomAudio } from './room-audio.js';
-import { AudioRelay, forgetRelayedAudio, playRelayedAudio, relayHopsNs, relayedAudioAnalyser, relayedAudioStats, relayNowNs, resumeRelayedAudio, setRelayedAudioDucked, useRelayClock } from './relay-audio.js';
+import { AudioRelay, forgetRelayedAudio, playRelayedAudio, relayHopsNs, relayedAudioAnalyser, relayedAudioStats, relayNowNs, resumeRelayedAudio, setRelayedAudioDucked, setRelayedAudioOutputDevice, useRelayClock } from './relay-audio.js';
 import { formatLagNs, isStaleNs, relayLagNs } from '/shared/protocol.js';
 import { RELAY_STALE_NS } from '/shared/protocol.js';
 import { gridColumnsFor } from '/shared/layout.js';
+// The same microphone constraints the camera manager opens devices with, so the settings
+// screen's device check sounds like the call does.
+import { microphoneConstraints } from '/shared/audio.js';
 import { formatCountdown, overlayDrawModel, remainingCountdownMs } from '/shared/overlays.js';
-import { CLIENT, REQUESTABLE_SCENE_TYPES, SERVER, canControlBroadcast } from '/shared/protocol.js';
+import { CLIENT, REACTION_GLYPHS, REACTION_KINDS, REACTION_LABELS, REACTION_SHOW_MS, REACTION_STATES, REQUESTABLE_SCENE_TYPES, SERVER, canControlBroadcast } from '/shared/protocol.js';
 import type {
   BreakoutCatalogue,
   ChatMessage,
@@ -104,6 +107,57 @@ interface ClientState {
   join: { name: string; roomId: string; role: string; password: string } | null;
   reconnecting: boolean;
   mail: { enabled: boolean; from: string | null };
+}
+
+/**
+ * My own settings, in one place.
+ *
+ * Everything on the settings screen is mine and lives in this browser: which devices to
+ * use, how joining behaves, how the room is shown to me, the broadcast defaults, and what
+ * this client is doing. Nothing here is sent to the room or changes what anybody else
+ * sees - the name and the role are only the *defaults* the join form starts on.
+ *
+ * The preferences that already had a key of their own (the panes, the people view, the
+ * stage view, the mirror, the bell) keep it, and this screen reads and writes them through
+ * the same functions the rest of the app uses, so there is one answer to each question.
+ */
+const SETTINGS_KEY = 'quandrite.settings';
+
+const DEFAULT_SETTINGS = {
+  /** What the join form starts with. */
+  name: '',
+  role: 'viewer',
+  /** Which device to capture with, by id. Empty means "whatever the browser picks". */
+  micId: '',
+  cameraId: '',
+  speakerId: '',
+  /** What pressing "Join call" does. The landing page's toggles override it for one join. */
+  joinWithMic: true,
+  joinWithVideo: false,
+  /** What the Go live tab starts on, for a host. */
+  preset: '',
+  record: true,
+};
+
+function loadSettings() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    return { ...DEFAULT_SETTINGS, ...(stored && typeof stored === 'object' ? stored : {}) };
+  } catch {
+    // a corrupt preference just means the defaults
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+/** Remember one or more preferences, and hand the whole set back. */
+function saveSettings(patch = {}) {
+  state.settings = { ...state.settings, ...patch };
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+  } catch {
+    // private mode: the choice simply does not persist
+  }
+  return state.settings;
 }
 
 const state: ClientState = {
@@ -193,56 +247,6 @@ const PEOPLE_VIEWS = ['slide', 'grid', 'list'];
 const PEOPLE_LIST_LIMIT = 50;
 /** Where we remember that the host chose to set the room password later. */
 const PASSWORD_PROMPT_KEY = 'quandrite.passwordPrompt';
-/**
- * My own settings, in one place.
- *
- * Everything on the settings screen is mine and lives in this browser: which devices to
- * use, how joining behaves, how the room is shown to me, the broadcast defaults, and what
- * this client is doing. Nothing here is sent to the room or changes what anybody else
- * sees - the name and the role are only the *defaults* the join form starts on.
- *
- * The preferences that already had a key of their own (the panes, the people view, the
- * stage view, the mirror, the bell) keep it, and this screen reads and writes them through
- * the same functions the rest of the app uses, so there is one answer to each question.
- */
-const SETTINGS_KEY = 'quandrite.settings';
-
-const DEFAULT_SETTINGS = {
-  /** What the join form starts with. */
-  name: '',
-  role: 'viewer',
-  /** Which device to capture with, by id. Empty means "whatever the browser picks". */
-  micId: '',
-  cameraId: '',
-  speakerId: '',
-  /** What pressing "Join call" does. The landing page's toggles override it for one join. */
-  joinWithMic: true,
-  joinWithVideo: false,
-  /** What the Go live tab starts on, for a host. */
-  preset: '',
-  record: true,
-};
-
-function loadSettings() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
-    return { ...DEFAULT_SETTINGS, ...(stored && typeof stored === 'object' ? stored : {}) };
-  } catch {
-    // a corrupt preference just means the defaults
-    return { ...DEFAULT_SETTINGS };
-  }
-}
-
-/** Remember one or more preferences, and hand the whole set back. */
-function saveSettings(patch = {}) {
-  state.settings = { ...state.settings, ...patch };
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
-  } catch {
-    // private mode: the choice simply does not persist
-  }
-  return state.settings;
-}
 /** The one-second repaint that keeps a running countdown counting. */
 let sceneWatchTimer: any = null;
 let sceneTicker: any = null;
@@ -374,6 +378,229 @@ function myScreenSource() {
   return state.camera.list().find((source) => source.kind === 'screen') || null;
 }
 
+// ------------------------------------------------------------------- reactions
+
+/**
+ * The meeting's reactions.
+ *
+ * There are two kinds, and they are shown differently because they *are* different:
+ *
+ *  - **a raised hand is a state.** It belongs in the roster (`handRaised`), so it shows on
+ *    the person's tile, in the People list and in the top bar for the person who raised
+ *    it - and it stays up until they lower it, including across a reload.
+ *  - **a smile, a clap, a thumbs up and a cheer are a burst.** They float up over the
+ *    stage with the name of whoever sent them, sway on the way, and remove themselves:
+ *    nothing about them is remembered, because nothing about them is a state.
+ *
+ * Everything comes from `shared/protocol.ts` - the kinds, the names and the glyphs - so the
+ * picker, the tiles and the server cannot disagree about what a clap looks like.
+ */
+function myHandRaised() {
+  return Boolean(state.members.find((member) => member.id === state.clientId)?.handRaised);
+}
+
+/**
+ * Build the picker once, from the catalogue.
+ *
+ * The buttons are built here rather than written into the page because the glyphs and the
+ * names live in the shared module: one place decides what a reaction *is*, and the markup
+ * stays free of emoji.
+ */
+function renderReactionPicker() {
+  const picker = $('#reaction-picker');
+  if (!picker) return;
+  if (!picker.dataset.built) {
+    picker.dataset.built = '1';
+    for (const kind of REACTION_KINDS) {
+      picker.append(
+        el('button', {
+          type: 'button',
+          class: 'reaction-choice',
+          role: 'menuitem',
+          dataset: { reaction: kind },
+          title: REACTION_LABELS[kind] || kind,
+          onclick: () => sendReaction(kind),
+        }, [
+          el('i', { class: 'reaction-glyph', text: REACTION_GLYPHS[kind] || '' }),
+          el('span', { text: REACTION_LABELS[kind] || kind }),
+        ]),
+      );
+    }
+  }
+  // The hand is a state, so its button says which way it will go.
+  const hand = picker.querySelector('[data-reaction="hand"]');
+  if (hand) {
+    const raised = myHandRaised();
+    hand.classList.toggle('on', raised);
+    hand.title = raised ? 'Lower your hand' : 'Raise your hand';
+    const label = hand.querySelector('span');
+    if (label) label.textContent = raised ? 'Lower hand' : 'Raise hand';
+  }
+}
+
+function reactionPickerOpen() {
+  return !$('#reaction-picker')?.classList.contains('hidden');
+}
+
+function openReactionPicker() {
+  renderReactionPicker();
+  $('#reaction-picker')?.classList.remove('hidden');
+  $('#btn-room-reactions')?.setAttribute('aria-expanded', 'true');
+}
+
+function closeReactionPicker() {
+  $('#reaction-picker')?.classList.add('hidden');
+  $('#btn-room-reactions')?.setAttribute('aria-expanded', 'false');
+}
+
+function toggleReactionPicker() {
+  if (reactionPickerOpen()) closeReactionPicker();
+  else openReactionPicker();
+}
+
+/**
+ * Say what *my* reactions are doing: the hand pill in the top bar, the bar's own button,
+ * and the picker's hand label.
+ *
+ * Called from `renderMyMediaButtons()`, which is what every roster and media change goes
+ * through - so a hand raised on another device, or lowered by the person themselves, is
+ * painted here without a second path to keep in step.
+ */
+function renderReactionIndicators() {
+  const raised = myHandRaised();
+
+  const pill = $('#hand-pill');
+  if (pill) {
+    pill.classList.toggle('hidden', !raised);
+    pill.classList.toggle('hand', raised);
+    pill.classList.toggle('clickable', raised);
+    // The hand waves here too: it is the same state, said in the same way.
+    if (raised) pill.innerHTML = `<i class="hand-glyph">${REACTION_GLYPHS.hand}</i> hand raised`;
+    pill.title = raised ? 'Your hand is up - click to lower it' : 'Your hand is not up';
+  }
+
+  const button = $('#btn-room-reactions');
+  if (button) {
+    button.classList.toggle('on', raised);
+    button.setAttribute('aria-pressed', String(raised));
+    button.title = raised
+      ? 'Your hand is up - react again or lower it'
+      : 'React - raise your hand, smile, clap';
+  }
+
+  if (reactionPickerOpen()) renderReactionPicker();
+}
+
+/**
+ * Send one reaction, and show my own burst at once.
+ *
+ * A burst is shown locally before the server has answered: waiting for the round trip
+ * would make a clap feel like a lag spike, and the whole point of a reaction is that it is
+ * instant. The server's own copy of my burst is skipped (the id says it is mine), so
+ * nobody sees their own clap twice.
+ */
+async function sendReaction(kind) {
+  if (!state.roomId) {
+    toast('Join a room to react', 'warn');
+    return;
+  }
+  const isHand = REACTION_STATES.includes(kind);
+  const on = isHand ? !myHandRaised() : undefined;
+  closeReactionPicker();
+  if (!isHand) showReaction({ id: 'mine', kind, from: state.clientId, fromName: state.name });
+  const result = await send(CLIENT.REACTION, isHand ? { kind, on } : { kind });
+  // Throttled by the server: the reaction was dropped. A burst that was already shown is
+  // not worth an error; a hand is a state, so it is worth saying.
+  if (result?.throttled && isHand) toast('Easy - one reaction at a time', 'info');
+}
+
+/**
+ * Float one reaction over the stage.
+ *
+ * It is placed over the sender's own tile when that tile is on screen - the reaction lands
+ * where the person is - and in a lane of their own when it is not (a viewer who is not in
+ * the grid, or my own reaction). The element removes itself when the animation is over, so
+ * a round of applause leaves nothing behind.
+ */
+function showReaction(reaction) {
+  const layer = $('#reaction-layer');
+  if (!layer || !reaction) return;
+  const glyph = REACTION_GLYPHS[reaction.kind];
+  if (!glyph) return;
+
+  const node = el('span', { class: `reaction-float reaction-${reaction.kind}` }, [
+    el('i', { class: 'reaction-glyph', text: glyph }),
+    el('span', {
+      class: 'reaction-who',
+      text: reaction.from === state.clientId ? 'you' : reaction.fromName || 'someone',
+    }),
+  ]);
+  node.style.left = `${reactionLeft(reaction)}%`;
+  // A few of them at once should not march in step.
+  node.style.animationDelay = `${Math.round(Math.random() * 140)}ms`;
+  layer.append(node);
+
+  const remove = () => node.remove();
+  node.addEventListener('animationend', (event) => {
+    if (event.target === node) remove();
+  });
+  // ...and a backstop, because a browser that never fires the event would leave it behind.
+  setTimeout(remove, REACTION_SHOW_MS + 800);
+
+  pingTileReaction(reaction);
+}
+
+/** Where a reaction floats: over the sender's tile, or in a lane of their own. */
+function reactionLeft(reaction) {
+  const grid = $('#remote-grid');
+  const tile = reaction.from ? grid?.querySelector(`[data-peer="${reaction.from}"]`) : null;
+  if (grid && tile) {
+    const gridBox = grid.getBoundingClientRect();
+    const box = tile.getBoundingClientRect();
+    if (gridBox.width > 0) {
+      const centre = ((box.left + box.width / 2 - gridBox.left) / gridBox.width) * 100;
+      return Math.max(6, Math.min(88, centre));
+    }
+  }
+  // Nobody's tile to land on: the same person's reactions keep to the same lane, so two
+  // people clapping at once do not stack on top of each other.
+  return 10 + (reactionLane(reaction.from || reaction.fromName || 'me') % 5) * 18;
+}
+
+/** A small, stable number for a sender, so their lane does not wander. */
+function reactionLane(key) {
+  let hash = 0;
+  for (const char of String(key)) hash = (hash * 31 + char.charCodeAt(0)) % 9973;
+  return hash;
+}
+
+/**
+ * Say who reacted, on their own tile, for as long as the burst is on screen.
+ *
+ * The float says *what* happened; this says *who* - which matters in a room of twenty
+ * people, where the float may be over somebody else's picture.
+ */
+function pingTileReaction(reaction) {
+  if (!reaction.from || reaction.from === state.clientId) return;
+  const name = document.querySelector(`#remote-grid [data-peer="${reaction.from}"] .name`);
+  if (!name) return;
+  name.querySelector('.reaction-ping')?.remove();
+  const ping = el('span', {
+    class: 'pill-badge reaction-ping',
+    text: REACTION_GLYPHS[reaction.kind] || '',
+    title: `${reaction.fromName || 'someone'} reacted`,
+  });
+  name.append(ping);
+  setTimeout(() => ping.remove(), REACTION_SHOW_MS);
+}
+
+/** Take every floating reaction away: the room is left, so nothing belongs on the stage. */
+function clearReactions() {
+  closeReactionPicker();
+  clear($('#reaction-layer'));
+  for (const ping of $$('.reaction-ping')) ping.remove();
+}
+
 /**
  * Paint my own two controls: the landing page's pre-join toggles and the meeting bar's
  * buttons, from what my microphone and camera are really doing.
@@ -408,6 +635,10 @@ function renderMyMediaButtons() {
   // The picker's screen button says what pressing it will do - including when a share
   // ended from the browser's own "stop sharing" bar rather than from here.
   renderScreenShareButton();
+  // ...and the share itself is said out loud, wherever I am looking.
+  renderScreenShareIndicators();
+  // A raised hand is mine too: the pill in the top bar and the bar's own React button.
+  renderReactionIndicators();
 
   // The landing page's preview shows what the camera will publish, and nothing at all
   // when it is off - so "the camera is on" is something I can see, not just be told.
@@ -418,6 +649,76 @@ function renderMyMediaButtons() {
     preview.hidden = !stream;
     if (stream) preview.play?.().catch(() => {});
   }
+}
+
+/**
+ * Say that I am sharing my screen - and let me stop it from wherever I am looking.
+ *
+ * A share is invisible in the room by itself: the screen goes to the program and to the
+ * studio's preview, and my own tile stays my camera. So it is said three times, from one
+ * state (`myScreenSource()`, so they can never disagree):
+ *
+ *  - a **pill in the top bar**, which is visible from anywhere in the app - including the
+ *    landing page and the settings screen - and ends the share when it is clicked, the way
+ *    the breakout pill leaves a breakout;
+ *  - a **banner over the stage**, with the thumbnail of what the room is actually seeing
+ *    and a button that stops it, where the sharing is happening;
+ *  - the meeting bar's **Share button**, whose label reads the state ("Share" / "Sharing")
+ *    like the microphone and camera icons do.
+ */
+function renderScreenShareIndicators() {
+  const sharing = myScreenSource();
+  const label = sharing?.label || 'your screen';
+
+  const pill = $('#sharing-pill');
+  if (pill) {
+    pill.classList.toggle('hidden', !sharing);
+    pill.classList.toggle('sharing', Boolean(sharing));
+    pill.classList.toggle('clickable', Boolean(sharing));
+    pill.title = sharing ? `You are sharing ${label} - click to stop` : 'You are not sharing your screen';
+  }
+
+  const banner = $('#screen-share-banner');
+  if (banner) banner.classList.toggle('hidden', !sharing);
+  const preview = $('#screen-share-preview');
+  if (preview) {
+    const stream = sharing?.stream || null;
+    if (preview.srcObject !== stream) preview.srcObject = stream;
+    if (stream) preview.play?.().catch(() => {});
+  }
+  const note = $('#screen-share-note');
+  if (note) note.textContent = sharing ? `${label} \u00b7 the room can see it` : '';
+
+  const barShare = $('#btn-room-share');
+  if (barShare) {
+    const barLabel = barShare.querySelector('.room-tool-label');
+    if (barLabel) barLabel.textContent = sharing ? 'Sharing' : 'Share';
+    barShare.title = sharing
+      ? 'Sharing your screen - open the picker to stop it or share a different one'
+      : 'Share your screen with the room';
+  }
+}
+
+/**
+ * End my screen share, from wherever I asked: the pill, the banner, or the picker.
+ *
+ * One function for the three, because they are one action - and because stopping has to do
+ * the same three things every time: drop the capture, tell the room, and repaint the
+ * buttons that were saying it.
+ *
+ * @returns {Promise<boolean>} whether there was a share to end.
+ */
+async function stopSharing() {
+  const sharing = myScreenSource();
+  if (!sharing) return false;
+  // Removing the source stops the capture tracks, which is also what takes the browser's
+  // own "stop sharing" bar away.
+  await state.camera.removeSource(sharing.id).catch(() => {});
+  if (state.roomId) await send(CLIENT.MEMBER_UPDATE, { patch: { screenSharing: false } });
+  toast('Screen share ended', 'info');
+  renderMyMediaButtons();
+  await renderDevicePicker();
+  return true;
 }
 
 function setLocalAudio(enabled) {
@@ -1257,6 +1558,19 @@ function boot() {
   if (params.get('room')) $('#join-room').value = params.get('room');
   if (params.get('name')) $('#join-name').value = params.get('name');
 
+  // My settings are what the join form starts on. The URL wins, because a link somebody
+  // sent me is about *that* room rather than about my defaults.
+  if (!params.get('name') && state.settings.name) $('#join-name').value = state.settings.name;
+  if (state.settings.role) {
+    $('#join-role').value = state.settings.role;
+    // The role decides whether the password field is asked for, and that is the form's own
+    // handler: telling it the value changed keeps the two in step.
+    $('#join-role').dispatchEvent(new Event('change'));
+  }
+  // The broadcast defaults the Go live tab starts on.
+  if (state.settings.record === false) $('#stream-record').checked = false;
+  applyOutputDevice().catch(() => {});
+
   // Nothing can be published before joining a room.
   updateControlAvailability();
   applyPaneVisibility();
@@ -1516,6 +1830,26 @@ function wireSocket() {
   socket.on('server-error', (message) => {
     if (message.message) toast(message.message, 'error');
   });
+
+  /**
+   * Somebody reacted.
+   *
+   * A **burst** floats over the stage - unless it is my own, which was already shown the
+   * moment I sent it (the server's copy would be the same clap twice). A **hand** is a
+   * state: the roster carries it, and that is what paints the tile, the list and the pill,
+   * so all this does is say out loud that somebody would like to speak.
+   */
+  socket.on(SERVER.REACTION, (reaction) => {
+    if (!reaction?.kind) return;
+    if (REACTION_STATES.includes(reaction.kind)) {
+      if (reaction.from !== state.clientId && reaction.on) {
+        toast(`${reaction.fromName || 'Someone'} raised their hand`, 'info');
+      }
+      return;
+    }
+    if (reaction.from === state.clientId) return;
+    showReaction(reaction);
+  });
 }
 
 function setPill(selector, className, text) {
@@ -1734,6 +2068,9 @@ function resetClientRoom() {
   renderChatBadges();
   setPill('#role-pill', '', 'guest');
   setPill('#breakout-pill', 'hidden', 'main room');
+  // A reaction belongs to the room I was in: leaving takes the floating ones with it, and
+  // my own hand goes down with the room's roster.
+  clearReactions();
   updateControlAvailability();
   updateJoinControls();
   renderMembers();
@@ -1905,10 +2242,32 @@ function renderRoomGrid() {
     } else if (!onAir && badge) {
       badge.remove();
     }
+    // ...and whoever is sharing their screen says so too: it is the thing the room is
+    // looking at, and the one tile that is not a face. It is appended after the on-air
+    // badge so the two stack instead of sitting on top of each other.
+    const sharing = Boolean(member.screenSharing);
+    let shareBadge = tile.querySelector('.badge-share');
+    if (sharing && !shareBadge) {
+      shareBadge = el('span', { class: 'badge-share' }, ['sharing screen']);
+      tile.append(shareBadge);
+    } else if (!sharing && shareBadge) {
+      shareBadge.remove();
+    }
     const name = tile.querySelector('.name');
     clear(name);
     name.append(roleDot(member.role), `${member.name}${isMe ? ' (you)' : ''}`);
     if (member.muted) name.append(el('span', { class: 'pill-badge' }, ['muted']));
+    // A raised hand is a state, so it sits with the other states next to the name - and it
+    // waves, because a hand that is up is waiting to be seen.
+    if (member.handRaised) {
+      name.append(
+        el('span', {
+          class: 'pill-badge hand',
+          title: `${member.name} has their hand raised`,
+          html: `<i class="hand-glyph">${REACTION_GLYPHS.hand}</i>`,
+        }),
+      );
+    }
     // A host moderates from the tile: mute them, stop their video, right where they are.
     tileTools(tile, member);
   }
@@ -2547,6 +2906,10 @@ function setNotificationsWanted(on) {
     // a browser that will not store it is fine
   }
   renderNotifyButton();
+  // The bell and the switch on the settings screen are the same preference, so they are
+  // painted together rather than one of them going stale.
+  const box = $('#settings-notify');
+  if (box) box.checked = Boolean(on);
 }
 
 /** The bell: off, on, or waiting for the browser's permission. */
@@ -2648,6 +3011,24 @@ function wireRoomToolbar() {
   $('#btn-room-breakout')?.addEventListener('click', () => openBreakoutPicker());
   // The studio's Rooms tab offers the same picker, for whoever is already reading the list.
   $('#btn-choose-breakout')?.addEventListener('click', () => openBreakoutPicker());
+
+  // Reactions: the bar's button opens the picker, the picker's buttons send, and the hand
+  // pill in the top bar takes a raised hand down again - the same toggle, wherever it is.
+  $('#btn-room-reactions')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleReactionPicker();
+  });
+  $('#hand-pill')?.addEventListener('click', () => sendReaction('hand'));
+  // A picker over the room closes when the click was somewhere else, and on Escape - a
+  // popover that only closes from its own button is a popover that traps people.
+  document.addEventListener('click', (event) => {
+    if (!reactionPickerOpen()) return;
+    if (event.target?.closest?.('#reaction-picker, #btn-room-reactions')) return;
+    closeReactionPicker();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && reactionPickerOpen()) closeReactionPicker();
+  });
   $('#btn-breakout-close')?.addEventListener('click', () => closeBreakoutPicker());
   $('#breakout-dialog')?.addEventListener('close', () => closeBreakoutPicker());
   $('#btn-room-people')?.addEventListener('click', () => openPeopleDialog());
@@ -2704,7 +3085,17 @@ function renderMembers() {
     list.append(
       el('li', {}, [
         el('div', { class: 'grow' }, [
-          el('div', { class: 'title', text: `${member.name}${isMe ? ' (you)' : ''}` }),
+          el('div', { class: 'title' }, [
+            `${member.name}${isMe ? ' (you)' : ''}`,
+            // A hand that is up is worth seeing in the roster, not only on the tile.
+            member.handRaised
+              ? el('span', {
+                  class: 'pill-badge hand',
+                  title: `${member.name} has their hand raised`,
+                  html: `<i class="hand-glyph">${REACTION_GLYPHS.hand}</i>`,
+                })
+              : null,
+          ]),
           el('div', {
             class: 'sub',
             text: [
@@ -2712,6 +3103,7 @@ function renderMembers() {
               member.muted ? 'muted' : 'mic on',
               member.cameraEnabled ? 'camera on' : 'camera off',
               member.screenSharing ? 'sharing screen' : null,
+              member.handRaised ? 'hand raised' : null,
             ]
               .filter(Boolean)
               .join(' \u00b7 '),
@@ -2889,6 +3281,7 @@ function renderPeople() {
               member.muted ? 'muted' : 'mic on',
               member.cameraEnabled ? 'camera on' : 'camera off',
               member.screenSharing ? 'sharing screen' : null,
+              member.handRaised ? 'hand raised' : null,
               `joined ${fmtTime(member.joinedAt)}`,
             ]
               .filter(Boolean)
@@ -3864,7 +4257,10 @@ function renderPresetOptions() {
       el('option', { value: preset.label, text: `${preset.label} \u00b7 ${preset.bitrateKbps} kbps` }),
     );
   }
+  // The room's own preset wins; my settings say what the tab starts on when the room has
+  // not chosen one.
   if (state.stream?.preset) select.value = state.stream.preset;
+  else if (state.settings.preset) select.value = state.settings.preset;
 }
 
 function renderPlatformOptions() {
@@ -4868,7 +5264,9 @@ async function applyOutputDevice(deviceId = state.settings.speakerId) {
   return room;
 }
 
-
+/**
+ * Zoom-style mic/camera toggle for myself: works in or out of the call.
+ *
  * The press follows what my own media is doing rather than the room's label for it, so
  * the same button means the same thing on the landing page's pre-join row and on the
  * meeting bar. Nothing here needs me to have joined the call first - the room's record
@@ -5304,6 +5702,83 @@ function wireControls() {
     $('#join-password-row')?.classList.toggle('hidden', !needsPassword);
   });
 
+  // My own settings: one screen, opened from the top bar wherever I am, and closed with
+  // "Done" - which gives the room (or the landing page) back. Every control here writes
+  // through the same function the rest of the app uses, so there is one answer to each
+  // question and no second copy of the truth.
+  $('#btn-settings').addEventListener('click', toggleSettings);
+  $('#btn-settings-close').addEventListener('click', closeSettings);
+
+  // You: the name and the role the join form starts on.
+  $('#settings-name').addEventListener('input', (event) => {
+    const name = event.target.value.trim();
+    saveSettings({ name });
+    const field = $('#join-name');
+    if (field && !field.value.trim()) field.value = name;
+  });
+  $('#settings-role').addEventListener('change', (event) => {
+    saveSettings({ role: event.target.value });
+    const field = $('#join-role');
+    if (field) {
+      field.value = event.target.value;
+      field.dispatchEvent(new Event('change'));
+    }
+  });
+
+  // Devices: remembered, and used the next time a device is opened - the check below uses
+  // them straight away, so a choice can be tried before it matters.
+  $('#settings-mic').addEventListener('change', (event) => saveSettings({ micId: event.target.value }));
+  $('#settings-camera').addEventListener('change', (event) => saveSettings({ cameraId: event.target.value }));
+  $('#settings-speaker').addEventListener('change', async (event) => {
+    saveSettings({ speakerId: event.target.value });
+    const applied = await applyOutputDevice(event.target.value);
+    if (event.target.value && !applied) {
+      toast('This browser cannot choose an output device - it follows the system', 'info');
+    }
+  });
+  $('#btn-settings-check').addEventListener('click', toggleSettingsCheck);
+
+  // How joining behaves. The landing page's own two toggles override this for one join.
+  $('#settings-join-mic').addEventListener('change', (event) => saveSettings({ joinWithMic: event.target.checked }));
+  $('#settings-join-video').addEventListener('change', (event) => saveSettings({ joinWithVideo: event.target.checked }));
+
+  // How the room is shown to me: the setters the room's own bar uses.
+  $('#settings-view').addEventListener('change', (event) => setStageView(event.target.value));
+  $('#settings-people-view').addEventListener('change', (event) => setPeopleView(event.target.value));
+  $('#settings-mirror').addEventListener('change', (event) => {
+    try {
+      localStorage.setItem(SELF_MIRROR_KEY, event.target.checked ? 'mirror' : 'plain');
+    } catch {
+      // a browser that will not store it is fine
+    }
+    applySelfViewMirror();
+  });
+  $('#settings-pane-grid').addEventListener('change', (event) => setPane('grid', event.target.checked));
+  $('#settings-pane-sidebar').addEventListener('change', (event) => setPane('sidebar', event.target.checked));
+
+  // The broadcast defaults: what the Go live tab starts on, for a host.
+  $('#settings-preset').addEventListener('change', (event) => {
+    saveSettings({ preset: event.target.value });
+    renderPresetOptions();
+  });
+  $('#settings-record').addEventListener('change', (event) => saveSettings({ record: event.target.checked }));
+
+  // Notifications: the one place a browser asks for permission, and it has to be a click.
+  $('#settings-notify').addEventListener('change', async (event) => {
+    if (event.target.checked) await enableNotifications();
+    else {
+      setNotificationsWanted(false);
+      toast('Desktop notifications are off', 'info');
+    }
+    // The permission may have been refused: say what the browser actually decided.
+    event.target.checked = notificationsWanted();
+    renderSettingsNotifyStatus();
+  });
+
+  // The readout, and the way back to the defaults.
+  $('#btn-settings-copy').addEventListener('click', copyDiagnostics);
+  $('#btn-settings-reset').addEventListener('click', resetMySettings);
+
   // The password page: set one and enter, or skip and set it inside the room.
   $('#password-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -5449,15 +5924,8 @@ function wireControls() {
   // share can never stack up behind the first. The client library replaces any share that
   // somehow survived (a share started from another tab, say) rather than adding to it.
   $('#btn-devices-screen').addEventListener('click', async () => {
-    const sharing = myScreenSource();
-    if (sharing) {
-      await state.camera.removeSource(sharing.id).catch(() => {});
-      if (state.roomId) await send(CLIENT.MEMBER_UPDATE, { patch: { screenSharing: false } });
-      toast('Screen share ended', 'info');
-      renderMyMediaButtons();
-      await renderDevicePicker();
-      return;
-    }
+    // Stopping is the same action wherever it is asked for, so it is the same function.
+    if (await stopSharing()) return;
 
     const source = await state.camera.addScreenShare({ audio: $('#screen-audio').checked });
     if (!source) return;
@@ -5591,6 +6059,11 @@ function wireControls() {
   // - wherever they happen to be looking.
   $('#btn-leave-breakout').addEventListener('click', leaveBreakoutRoom);
   $('#breakout-pill').addEventListener('click', leaveBreakoutRoom);
+
+  // ...and anyone can end their own screen share the same way: from the pill in the top
+  // bar, or from the banner over the stage, wherever they happen to be looking.
+  $('#sharing-pill').addEventListener('click', () => stopSharing());
+  $('#btn-stop-sharing').addEventListener('click', () => stopSharing());
 }
 
 /** Leave the breakout room I am in, and go back to the main room. */

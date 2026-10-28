@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CLIENT, SERVER, REQUESTABLE_SCENE_TYPES, decodeRelayFrame, encodeRelayFrame, isRelayFrame, pushPayload } from '../shared/protocol.ts';
+import { CLIENT, REACTION_BURST, REACTION_GLYPHS, REACTION_KINDS, REACTION_LABELS, REACTION_MAX_PER_SECOND, REACTION_STATES, SERVER, REQUESTABLE_SCENE_TYPES, decodeRelayFrame, encodeRelayFrame, isRelayFrame, pushPayload } from '../shared/protocol.ts';
 import { REQUESTABLE_OVERLAY_TYPES } from '../shared/overlays.ts';
 
 const rootDir = path.resolve(import.meta.dirname, '..');
@@ -523,7 +523,7 @@ test('a host with no room password sets one on its own page', () => {
 
 test('the password page sits between the join form and the room', () => {
   const source = readClient('app');
-  // Three screens, one at a time: landing, password page, studio.
+  // Four screens, one at a time: landing, password page, my settings, the studio.
   assert.match(source, /if \(landing\) landing\.classList\.toggle\('hidden', inRoom\)/, 'the landing gives way to a room');
   assert.match(
     source,
@@ -532,8 +532,8 @@ test('the password page sits between the join form and the room', () => {
   );
   assert.match(
     source,
-    /setRoomOpen\(inRoom && !needsPassword\)/,
-    'and the studio waits for it',
+    /setRoomOpen\(inRoom && !needsPassword && !settingsOpen\)/,
+    'and the studio waits for it - and for the settings screen',
   );
   assert.match(source, /function skipPasswordPage\(\)/, 'Later enters the room without one');
   assert.match(source, /passwordPageHandled = Boolean\(silent\)/, 'a reconnect never interrupts with the page');
@@ -1613,7 +1613,7 @@ test('a host can mute and stop a participant, and it is enforced', () => {
   // ...and joining the call does not overrule the host either - or me: a microphone I
   // switched off before joining stays off.
   assert.match(app, /const mine = microphoneTracks\(\)\.length > 0 && !myMicEnabled\(\);/, 'my own pre-join choice is a mute too');
-  assert.match(app, /const held = Boolean\(me\?\.muted\) \|\| mine;[\s\S]{0,120}?setLocalAudio\(!held\);/, 'so joining the call respects the record');
+  assert.match(app, /const held = Boolean\(me\?\.muted\) \|\| mine \|\| settings\.joinWithMic === false;[\s\S]{0,120}?setLocalAudio\(!held\);/, 'so joining the call respects the record, my own mute, and my settings');
   assert.match(app, /send\(CLIENT\.MEMBER_UPDATE, \{ patch: \{ cameraEnabled: Boolean\(myCameraSource\(\)\), muted: held \} \}\);/, 'and says what the video is actually doing, rather than announcing an unmute');
   // The server keeps an individual mute, by name, so a reload does not undo it.
   assert.match(studio, /this\.mutedNames = new Set\(\);/, 'the room remembers who was muted');
@@ -1749,7 +1749,11 @@ test('joining a meeting is the initial state, and my own media is mine', () => {
   assert.match(app, /async function announceLocalMedia\(\)/, 'pre-join media is handed to the room');
   assert.match(app, /await state\.camera\.announceSource\(source\.id\)/, 'by announcing it');
   assert.match(app, /await announceLocalMedia\(\)\.catch\(\(\) => \{\}\);/, 'as part of joining');
-  assert.match(app, /const added = await state\.camera\.addCamera\(\{ announce: Boolean\(state\.roomId\) \}\)/, 'a pre-join camera is not announced to a room that does not exist');
+  assert.match(
+    app,
+    /const added = await state\.camera\.addCamera\(\{\s*\n\s*deviceId: state\.settings\.cameraId \|\| null,\s*\n\s*announce: Boolean\(state\.roomId\),\s*\n\s*\}\)/,
+    'a pre-join camera is not announced to a room that does not exist, and uses the camera I chose',
+  );
   const devices = readClient('devices');
   assert.match(devices, /async announceSource\(sourceId\) \{/, 'the camera manager can announce a source later');
 });
@@ -1763,14 +1767,69 @@ test('a screen share happens once: the second share replaces the first', () => {
   assert.match(devices, /async endScreenShares\(\) \{\s*\n\s*const sharing = this\.list\(\)\.filter\(\(source\) => source\.kind === 'screen'\);/, 'every screen of mine');
   assert.match(devices, /for \(const source of sharing\) await this\.removeSource\(source\.id\)/, 'is stopped, not just forgotten');
 
-  // ...and the UI is a toggle, so the same press ends what it started.
-  assert.match(app, /const sharing = myScreenSource\(\);\s*\n\s*if \(sharing\) \{/, 'the picker ends the share it started');
+  // ...and the UI is a toggle, so the same press ends what it started - through the one
+  // function that stopping goes through, wherever it is asked for.
+  assert.match(app, /if \(await stopSharing\(\)\) return;/, 'the picker ends the share it started');
+  assert.match(app, /async function stopSharing\(\) \{\s*\n\s*const sharing = myScreenSource\(\);/, 'which is the one way to stop');
   assert.match(app, /await state\.camera\.removeSource\(sharing\.id\)/, 'by removing the source');
   assert.match(app, /function renderScreenShareButton\(\)/, 'and says what the next press will do');
   assert.match(app, /button\.textContent = sharing \? 'Stop sharing' : 'Share screen';/, 'stop or start');
   assert.match(app, /renderScreenShareButton\(\);/, 'which is repainted with the picker');
 });
 
+
+
+test('sharing my screen says so, wherever I am looking', () => {
+  // Two places, from one state: a pill in the top bar (visible from anywhere, including
+  // the landing page and the settings screen) and a banner over the stage with the
+  // thumbnail of what the room is seeing.
+  assert.match(
+    HTML,
+    /<button type="button" id="sharing-pill" class="pill hidden"[^>]*>sharing my screen<\/button>/,
+    'the top bar carries a pill for it',
+  );
+  const banner = /<div id="screen-share-banner" class="screen-share-banner hidden">([\s\S]*?)<\/div>\s*<\/div>/.exec(HTML);
+  assert.ok(banner, 'and the stage carries a banner');
+  for (const id of ['screen-share-preview', 'screen-share-note', 'btn-stop-sharing']) {
+    assert.ok(banner[1].includes(`id="${id}"`), `${id} is in the banner`);
+  }
+  assert.match(banner[1], /<video id="screen-share-preview"[\s\S]{0,120}?muted>/, 'the thumbnail is my own picture, never played back at me');
+  assert.match(banner[1], /id="btn-stop-sharing"[^>]*>Stop sharing<\/button>/, 'and it can be ended from there');
+
+  // It is a sibling of the stage's views, so Program, People and Split all show it.
+  const stage = /<section class="room-stage" id="room-stage">([\s\S]*?)<\/section>/.exec(HTML);
+  assert.ok(stage && stage[1].includes('id="screen-share-banner"'), 'the banner is in the stage, not inside one view');
+  assert.match(CSS, /\.screen-share-banner \{[\s\S]{0,200}?position: absolute; left: 10px; bottom: 68px;/, 'it floats at the bottom of the stage, clear of the program bar and of my own picture');
+  assert.match(CSS, /\.pill\.sharing \{/, 'and the pill is styled as a thing I am doing');
+  assert.match(CSS, /\.pill\.clickable \{ cursor: pointer; \}/, 'and is clickable');
+
+  const app = readClient('app');
+  // One painter, called from the same place the microphone and camera icons are painted.
+  assert.match(app, /function renderScreenShareIndicators\(\) \{/, 'one function says it');
+  assert.match(
+    app,
+    /renderScreenShareIndicators\(\);[\s\S]{0,200}?renderReactionIndicators\(\);/,
+    'which runs whenever my own media is painted',
+  );
+  assert.match(app, /pill\.classList\.toggle\('hidden', !sharing\);/, 'the pill follows the share');
+  assert.match(app, /banner\.classList\.toggle\('hidden', !sharing\);/, 'and so does the banner');
+  assert.match(app, /preview\.srcObject !== stream/, 'the thumbnail is the screen I am sharing');
+  assert.match(app, /barLabel\.textContent = sharing \? 'Sharing' : 'Share';/, 'and the bar reads the state, like the mic and camera icons');
+  assert.match(app, /barShare\.title = sharing/, 'with a tooltip that says what the press will do');
+
+  // Three ways out of it, and they are one action: the pill, the banner, the picker.
+  assert.match(app, /async function stopSharing\(\) \{/, 'stopping is one function');
+  assert.match(app, /\$\('#sharing-pill'\)\.addEventListener\('click', \(\) => stopSharing\(\)\);/, 'the pill ends the share');
+  assert.match(app, /\$\('#btn-stop-sharing'\)\.addEventListener\('click', \(\) => stopSharing\(\)\);/, 'and so does the banner');
+  assert.match(app, /send\(CLIENT\.MEMBER_UPDATE, \{ patch: \{ screenSharing: false \} \}\)/, 'the room is told');
+
+  // Someone else's share is on their tile - the badge the stylesheet was already waiting
+  // for - and it steps down when they are on air too.
+  assert.match(app, /const sharing = Boolean\(member\.screenSharing\);/, 'a member who is sharing is known on their tile');
+  assert.match(app, /shareBadge = el\('span', \{ class: 'badge-share' \}, \['sharing screen'\]\);/, 'and their tile says so');
+  assert.match(CSS, /\.room-tile \.badge-share \{/, 'which is styled');
+  assert.match(CSS, /\.room-tile \.badge-air ~ \.badge-share \{ top: 34px; \}/, 'stacking under the on-air badge rather than over it');
+});
 
 
 test('the meeting bar sits with the program frame, and the rooms are visible', () => {
@@ -1837,4 +1896,179 @@ test('audio survives the paths that used to break it', () => {
   // announced when the room arrives instead.
   assert.match(devices, /async addMicrophone\(\{ deviceId = null, label = null, announce = true \}: any = \{\}\)/, 'a microphone can be captured without a room');
   assert.match(app, /async function ensureMicrophone\(\{ announce = Boolean\(state\.roomId\) \}: any = \{\}\)/, 'which is how the pre-join microphone is opened');
+});
+
+test('my settings are one screen, and every control on it does something', () => {
+  // The gear is always there: my settings are mine, not the room's.
+  assert.match(
+    HTML,
+    /<button type="button" id="btn-settings" class="settings-button"[^>]*>\s*<svg class="icon"/,
+    'the top bar carries a settings button',
+  );
+  const page = /<section id="settings-page" class="landing hidden">([\s\S]*?)<\/section>/.exec(HTML);
+  assert.ok(page, 'which opens a screen of its own');
+  for (const id of [
+    'btn-settings-close',
+    'settings-name',
+    'settings-role',
+    'settings-mic',
+    'settings-camera',
+    'settings-speaker',
+    'settings-preview',
+    'settings-level',
+    'settings-check-status',
+    'btn-settings-check',
+    'settings-join-mic',
+    'settings-join-video',
+    'settings-view',
+    'settings-people-view',
+    'settings-mirror',
+    'settings-pane-grid',
+    'settings-pane-sidebar',
+    'settings-preset',
+    'settings-record',
+    'settings-notify',
+    'settings-notify-status',
+    'settings-diagnostics',
+    'btn-settings-copy',
+    'btn-settings-reset',
+  ]) {
+    assert.ok(page[1].includes(`id="${id}"`), `${id} is on the settings screen`);
+  }
+  assert.match(page[1], /data-requires="control"/, 'and the broadcast defaults are the host\'s');
+
+  const app = readClient('app');
+  // One screen among the screens: the gear opens it, Done closes it, and the room waits.
+  assert.match(app, /function openSettings\(\) \{/, 'the screen can be opened');
+  assert.match(app, /function closeSettings\(\) \{/, 'and closed');
+  assert.match(app, /\$\('#btn-settings'\)\.addEventListener\('click', toggleSettings\);/, 'the gear toggles it');
+  assert.match(app, /\$\('#btn-settings-close'\)\.addEventListener\('click', closeSettings\);/, 'and Done closes it');
+  assert.match(
+    app,
+    /const settings = \$\('#settings-page'\);\s*\n\s*if \(settings\) settings\.classList\.toggle\('hidden', !settingsOpen\);/,
+    'the screen is one of the screens',
+  );
+  assert.match(app, /if \(settingsOpen\) landing\?\.classList\.add\('hidden'\);/, 'and it covers the landing page while it is open');
+
+  // One place for the preferences - and the ones that already had a key of their own are
+  // written through the same setter the rest of the app uses.
+  assert.match(app, /const SETTINGS_KEY = 'quandrite\.settings';/, 'the settings have one key');
+  assert.match(app, /function loadSettings\(\)/, 'and are loaded');
+  assert.match(app, /function saveSettings\(patch = \{\}\)/, 'and saved');
+  assert.match(app, /setStageView\(event\.target\.value\)/, "the main view is the room's own setter");
+  assert.match(app, /setPeopleView\(event\.target\.value\)/, 'and so is the people view');
+  assert.match(app, /setPane\('grid', event\.target\.checked\)/, 'the panes go through the pane setter');
+  assert.match(
+    app,
+    /localStorage\.setItem\(SELF_MIRROR_KEY, event\.target\.checked \? 'mirror' : 'plain'\);/,
+    'the mirror is the same key the self view reads',
+  );
+
+  // The devices are the ones the rest of the client captures with.
+  assert.match(
+    app,
+    /return state\.camera\.addMicrophone\(\{ announce, deviceId: state\.settings\.micId \|\| null \}\);/,
+    'unmuting opens the microphone I chose',
+  );
+  assert.match(app, /async function applyOutputDevice\(deviceId = state\.settings\.speakerId\)/, 'the speaker is applied to the audio contexts');
+  const mixer = readClient('room-audio');
+  assert.match(mixer, /async setOutputDevice\(deviceId: string\) \{/, 'the room mixer can be pointed at a speaker');
+  const relay = readClient('relay-audio');
+  assert.match(relay, /export async function setRelayedAudioOutputDevice\(deviceId: string\)/, 'and so can the relayed voice');
+
+  // The check publishes nothing: it opens its own streams, and closes them again.
+  assert.match(app, /async function startSettingsCheck\(\)/, 'the check opens the chosen devices');
+  assert.match(app, /function stopSettingsCheck\(\) \{/, 'and closes them');
+  assert.match(app, /settingsCheck\.context\?\.close\?\.\(\)\.catch\?\.\(\(\) => \{\}\);/, 'including the meter it made');
+  assert.match(app, /for \(const track of stream\?\.getTracks\?\.\(\) \|\| \[\]\) track\.stop\(\);/, 'and every track it opened');
+
+  // Joining follows the settings; the readout is real and keeps moving.
+  assert.match(app, /if \(settings\.joinWithVideo && !myCameraSource\(\)\) await toggleMyMedia\('camera'\);/, 'joining with video is a setting, not a surprise');
+  assert.match(app, /settingsTicker = setInterval\(renderSettingsDiagnostics, 1000\);/, 'the readout is repainted while the screen is open');
+  assert.match(app, /async function copyDiagnostics\(\)/, 'and can be copied');
+  assert.match(app, /function resetMySettings\(\) \{/, 'the defaults can be restored');
+  assert.match(app, /if \(key\.startsWith\('quandrite\.'\)\) localStorage\.removeItem\(key\);/, 'by clearing every preference this browser holds');
+  assert.match(CSS, /\.settings-card \{ width: min\(760px, 96vw\); gap: 10px; \}/, 'the screen is styled');
+  assert.match(CSS, /\.settings-level i\.on \{/, 'and the level bars light up');
+});
+
+test('a meeting can be reacted to: a hand that stays up, and bursts that float away', () => {
+  const PROTOCOL_SOURCE = fs.readFileSync(path.join(rootDir, 'shared', 'protocol.ts'), 'utf8');
+  // The vocabulary lives in the shared module, so both ends and every screen agree.
+  assert.deepEqual([...REACTION_KINDS], ['hand', 'smile', 'thumb', 'clap', 'congrats'], 'the reactions a meeting has');
+  assert.deepEqual([...REACTION_STATES], ['hand'], 'and the one that is a state rather than a burst');
+  for (const kind of REACTION_KINDS) {
+    assert.ok(REACTION_LABELS[kind], `${kind} has a name`);
+    assert.ok(REACTION_GLYPHS[kind], `${kind} has a glyph`);
+  }
+  assert.ok(REACTION_MAX_PER_SECOND > 0 && REACTION_BURST >= 1, 'reactions are rate-limited, not refused');
+  assert.match(PROTOCOL_SOURCE, /handRaised: boolean;/, 'a raised hand is part of the roster');
+  assert.match(PROTOCOL_SOURCE, /REACTION: 'reaction:send'/, 'and there is a message to send one');
+
+  // The server: a hand is written into the roster *and* remembered, so a reload keeps it;
+  // a burst is only broadcast, to the room the sender is standing in.
+  const server = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
+  const studio = fs.readFileSync(path.join(rootDir, 'server', 'studio.ts'), 'utf8');
+  assert.match(server, /case CLIENT\.REACTION: \{/, 'the server takes reactions');
+  assert.match(server, /if \(!REACTION_KINDS\.includes\(kind\)\) return this\._fail\(session, id, `unsupported reaction: \$\{kind\}`\);/, 'only the reactions it knows');
+  assert.match(server, /bucket\.tokens = Math\.min\([\s\S]{0,140}?REACTION_MAX_PER_SECOND,/, 'with a burst allowance rather than a refusal');
+  assert.match(server, /this\._ack\(session, id, \{ throttled: true \}\);/, 'and the ack says when one was dropped');
+  assert.match(server, /studio\.updateMember\(session\.id, \{ handRaised: raised \}\);/, 'a hand goes into the roster');
+  assert.match(server, /studio\.rememberHand\(session\.id, raised\);/, 'and is remembered');
+  assert.match(server, /this\._broadcast\(session\.attendedRoomId \|\| studio\.id, \{ type: SERVER\.REACTION, payload: reaction \}\);/, 'the event goes to the room the sender is in');
+  assert.match(studio, /handNames: Set<string>;/, 'the room keeps the hands up by name');
+  assert.match(studio, /handRaised: this\.handNames\.has\(nameKey\(memberName\)\),/, 'so somebody who reloads still has their hand up');
+  assert.match(studio, /rememberHand\(clientId, raised\) \{/, "and it is the person's own to lower");
+});
+
+
+
+
+test('reactions reach the stage, the tiles and the bar', () => {
+  // The client: a picker built from the catalogue, a hand pill in the top bar, and a float
+  // for every burst.
+  const app = readClient('app');
+  assert.match(HTML, /id="btn-room-reactions" class="room-tool" aria-haspopup="true"/, 'the meeting bar has a React button');
+  assert.match(HTML, /<div id="reaction-picker" class="reaction-picker hidden" role="menu"/, 'which opens a picker');
+  assert.match(HTML, /<div id="reaction-layer" class="reaction-layer"/, 'and the stage has a layer for the floats');
+  assert.match(HTML, /id="hand-pill" class="pill hidden"/, 'a raised hand has a pill in the top bar');
+  assert.match(app, /for \(const kind of REACTION_KINDS\) \{/, 'the picker is built from the catalogue');
+  assert.match(app, /dataset: \{ reaction: kind \}/, 'one button per reaction');
+  assert.match(app, /text: REACTION_GLYPHS\[kind\] \|\| ''/, 'with the shared glyph');
+  assert.match(app, /if \(reactionPickerOpen\(\)\) renderReactionPicker\(\);/, 'and it is repainted with my own state');
+  assert.match(app, /\$\('#hand-pill'\)\?\.addEventListener\('click', \(\) => sendReaction\('hand'\)\);/, 'the pill lowers a raised hand');
+  assert.match(app, /event\.key === 'Escape' && reactionPickerOpen\(\)/, 'Escape closes the picker');
+  assert.match(app, /closest\?\.\('#reaction-picker, #btn-room-reactions'\)/, 'and a click elsewhere does too');
+
+  // Sending: my own burst is shown at once, and the server's copy of it is not shown twice.
+  assert.match(app, /const isHand = REACTION_STATES\.includes\(kind\);/, 'a hand is sent as a state');
+  assert.match(app, /if \(!isHand\) showReaction\(\{ id: 'mine', kind, from: state\.clientId, fromName: state\.name \}\);/, 'a burst of mine floats immediately');
+  assert.match(app, /if \(reaction\.from === state\.clientId\) return;\s*\n\s*showReaction\(reaction\);/, 'and its echo is skipped');
+  assert.match(app, /socket\.on\(SERVER\.REACTION, \(reaction\) => \{/, "the room's reactions arrive");
+  assert.match(app, /toast\(`\$\{reaction\.fromName \|\| 'Someone'\} raised their hand`, 'info'\);/, 'a raised hand is said out loud');
+  assert.match(app, /function clearReactions\(\) \{/, 'and leaving the room takes them away');
+
+  // The float: it lands where the person is, it sways on the way up, and it removes itself.
+  assert.match(app, /function showReaction\(reaction\) \{/, 'one function floats a reaction');
+  assert.match(app, /class: `reaction-float reaction-\$\{reaction\.kind\}`/, 'tagged by what it is');
+  assert.match(app, /text: reaction\.from === state\.clientId \? 'you' : reaction\.fromName \|\| 'someone',/, 'with the name of whoever reacted');
+  assert.match(app, /node\.style\.left = `\$\{reactionLeft\(reaction\)\}%`;/, 'placed over their tile');
+  assert.match(app, /const tile = reaction\.from \? grid\?\.querySelector\(`\[data-peer="\$\{reaction\.from\}"\]`\) : null;/, 'which is the tile the room already has');
+  assert.match(app, /return 10 \+ \(reactionLane\(reaction\.from \|\| reaction\.fromName \|\| 'me'\) % 5\) \* 18;/, 'or in a lane of their own when they have no tile');
+  assert.match(app, /setTimeout\(remove, REACTION_SHOW_MS \+ 800\);/, 'and nothing is left behind');
+  assert.match(app, /function pingTileReaction\(reaction\) \{/, 'their tile says who reacted');
+
+  // A hand shows wherever a state shows: the tile and the roster lines.
+  assert.match(app, /class: 'pill-badge hand',/, "a raised hand is on the person's tile");
+  assert.match(app, /member\.handRaised \? 'hand raised' : null,/, 'and in the roster lines');
+
+  // The animation: it rises, it sways, and a raised hand waves - with a reduced-motion way out.
+  assert.match(CSS, /\.reaction-float \{[\s\S]{0,160}?animation: reaction-rise 2\.6s/, 'a reaction rises');
+  assert.match(CSS, /@keyframes reaction-rise \{/, 'and the rise is a real animation');
+  assert.match(CSS, /@keyframes reaction-sway \{[\s\S]{0,120}?rotate\(-9deg\)/, 'with a sway on the way');
+  assert.match(CSS, /@keyframes hand-wave \{/, 'and a wave for a raised hand');
+  assert.match(CSS, /\.hand-glyph \{[\s\S]{0,140}?animation: hand-wave 1\.6s/, 'which is the glyph wherever it is shown');
+  assert.match(CSS, /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.reaction-float \{ animation: reaction-fade 2\.6s/, 'reduced motion gets the reaction without the travel');
+  assert.match(CSS, /\.reaction-picker \{[\s\S]{0,200}?position: absolute; bottom: calc\(100% \+ 10px\)/, 'the picker sits above the bar');
+  assert.match(CSS, /\.reaction-layer \{[\s\S]{0,140}?pointer-events: none;/, 'and the float layer never swallows a click');
 });
