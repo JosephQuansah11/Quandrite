@@ -1,9 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "noEmit": true,
-    "types": [],
-    "lib": ["ES2023", "DOM", "DOM.Iterable"]
-  },
-  "include": ["public/js/**/*.ts", "shared/**/*.ts"]
-}

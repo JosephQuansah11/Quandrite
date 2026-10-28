@@ -16,24 +16,44 @@ import { REQUESTABLE_OVERLAY_TYPES } from '../shared/overlays.ts';
 
 const rootDir = path.resolve(import.meta.dirname, '..');
 const CLIENT_DIR = path.join(rootDir, 'public', 'js');
+const LIB_DIR = path.join(rootDir, 'src', 'lib');
+
+/**
+ * Read a client module by name.
+ *
+ * The engine modules have moved to `src/lib` as part of the port, so a test that names
+ * `webrtc` gets it from wherever it lives now rather than from a path that may be gone.
+ */
+function readClient(name: string): string {
+  for (const dir of [CLIENT_DIR, LIB_DIR]) {
+    const file = path.join(dir, `${name}.ts`);
+    if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8');
+  }
+  throw new Error(`no client module named ${name}`);
+}
+
 const HTML = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
 const CSS = fs.readFileSync(path.join(rootDir, 'public', 'styles.css'), 'utf8');
 
+/** Every TypeScript source under a directory, so the new React code is covered too. */
+function walk(dir: string, out: string[] = []): string[] {
+  if (!fs.existsSync(dir)) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, out);
+    else if (/\.tsx?$/.test(entry.name)) out.push(full);
+  }
+  return out;
+}
+
+const SRC_DIR = path.join(rootDir, 'src');
+
 function clientFiles() {
-  return fs
-    .readdirSync(CLIENT_DIR)
-    .filter((file) => file.endsWith('.ts'))
-    .map((file) => path.join(CLIENT_DIR, file));
+  return [...walk(CLIENT_DIR), ...walk(SRC_DIR)];
 }
 
 function moduleFiles() {
-  const files = [];
-  for (const dir of ['shared', 'server', 'public/js']) {
-    for (const file of fs.readdirSync(path.join(rootDir, dir))) {
-      if (file.endsWith('.ts')) files.push(path.join(rootDir, dir, file));
-    }
-  }
-  return files;
+  return [...walk(path.join(rootDir, 'shared')), ...walk(path.join(rootDir, 'server')), ...clientFiles()];
 }
 
 function exportedNames(file) {
@@ -54,19 +74,44 @@ function exportedNames(file) {
   return names;
 }
 
+/** The first of these paths that exists, so `@/ui/Button` finds `Button.tsx`. */
+function firstExisting(...candidates: string[]) {
+  for (const candidate of candidates) if (fs.existsSync(candidate)) return candidate;
+  return candidates[0];
+}
+
 /**
  * Where a specifier points on disk.
  *
- * The browser loads the compiled `.js` twins of the shared modules and of its
- * own siblings, while the server imports the `.ts` sources directly, so both
- * spellings resolve to the same source file.
+ * Three spellings reach the same file: the server imports `.ts` sources directly, the
+ * current client asks for the `.js` twin of its neighbours (which is how Node's
+ * resolver wrote it), and the React app uses the `@shared` / `@` aliases Vite resolves.
+ * The engine modules have already moved to `src/lib`, so a sibling that is not there
+ * any more is looked for there - the same bridge the legacy build uses.
  */
 function resolveSpecifier(file, specifier) {
+  if (specifier.startsWith('@shared/')) {
+    const base = path.join(rootDir, 'shared', specifier.slice('@shared/'.length));
+    return firstExisting(`${base}.ts`, `${base}.tsx`);
+  }
+  if (specifier.startsWith('@/')) {
+    const base = path.join(SRC_DIR, specifier.slice(2));
+    return firstExisting(`${base}.ts`, `${base}.tsx`, path.join(base, 'index.ts'), path.join(base, 'index.tsx'));
+  }
   if (specifier.startsWith('/shared/')) {
-    return path.join(rootDir, specifier.slice(1).replace(/\.js$/, '.ts'));
+    return firstExisting(path.join(rootDir, specifier.slice(1).replace(/\.js$/, '.ts')));
   }
   if (specifier.startsWith('./') || specifier.startsWith('../')) {
-    return path.join(path.dirname(file), specifier.replace(/\.js$/, '.ts'));
+    // Extensionless specifiers (the React app) and `.js` ones (the current client) both
+    // land on a `.ts`/`.tsx` file, next to the importer or in the moved engine modules.
+    const raw = path.join(path.dirname(file), specifier).replace(/\.(js|ts|tsx)$/, '');
+    const name = path.basename(raw);
+    return firstExisting(
+      `${raw}.ts`,
+      `${raw}.tsx`,
+      path.join(SRC_DIR, 'lib', `${name}.ts`),
+      path.join(SRC_DIR, 'lib', `${name}.tsx`),
+    );
   }
   return null;
 }
@@ -89,7 +134,8 @@ test('every module import resolves to a real export', () => {
       if (!braces) continue;
       const available = exportedNames(target);
       for (const part of braces[1].split(',')) {
-        const name = part.trim().split(/\s+as\s+/)[0].trim();
+        // `import { type Tool }` and `import type { Tool }` name the same export.
+        const name = part.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim();
         if (name && !available.has(name)) {
           problems.push(`${path.relative(rootDir, file)} imports '${name}' which ${specifier} does not export`);
         }
@@ -114,7 +160,13 @@ test('the client only uses protocol constants the server defines', () => {
 });
 
 test('every DOM id the client reaches for exists in the page', () => {
-  const ids = new Set([...HTML.matchAll(/id="([^"]+)"/g)].map((match) => match[1]));
+  // Both pages while the port is running: the current client's and the React app's,
+  // whose `#root` the new entry mounts into.
+  const rootPage = path.join(rootDir, 'index.html');
+  const newHtml = fs.existsSync(rootPage) ? fs.readFileSync(rootPage, 'utf8') : '';
+  const ids = new Set(
+    [...HTML.matchAll(/id="([^"]+)"/g), ...newHtml.matchAll(/id="([^"]+)"/g)].map((match) => match[1]),
+  );
   const problems = [];
   for (const file of clientFiles()) {
     const source = fs.readFileSync(file, 'utf8');
@@ -129,16 +181,22 @@ test('every DOM id the client reaches for exists in the page', () => {
 });
 
 test('the page loads assets that actually exist', () => {
-  const assets = [...HTML.matchAll(/(?:src|href)="(\/[^"]+)"/g)].map((match) => match[1]);
+  // The built page is what a browser is served, and Vite gives its assets hashed
+  // names - so the check is against the page that was actually built, not the sources.
+  const built = path.join(rootDir, 'build', 'public', 'index.html');
+  const html = fs.existsSync(built) ? fs.readFileSync(built, 'utf8') : HTML;
+  const assets = [...html.matchAll(/(?:src|href)="(\/[^"]+)"/g)].map((match) => match[1]);
   assert.ok(assets.length >= 2);
-  // The browser is served the compiled client from `build/`, not the sources.
   for (const asset of assets) {
-    assert.ok(fs.existsSync(path.join(rootDir, 'build', 'public', asset.replace(/^\//, ''))), `${asset} exists`);
+    assert.ok(
+      fs.existsSync(path.join(rootDir, 'build', 'public', asset.replace(/^\//, ''))),
+      `${asset} exists`,
+    );
   }
 });
 
 test('the scene form in the UI covers every overlay type', () => {
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   const block = /const SCENE_FIELDS = \{([\s\S]*?)\n\};/.exec(source);
   assert.ok(block, 'SCENE_FIELDS is declared in app.ts');
   const keys = [...block[1].matchAll(/^\s{2}([a-z]+):\s*\[/gm)].map((match) => match[1]);
@@ -147,7 +205,7 @@ test('the scene form in the UI covers every overlay type', () => {
 });
 
 test('host-only panes are marked and hidden from viewers and visitors', () => {
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   assert.match(source, /function applyRoleVisibility\(\)/, 'the role visibility helper exists');
   assert.match(source, /dataset\.requires/, 'the helper reads the data-requires markers');
 
@@ -178,7 +236,7 @@ test('the grid preview belongs to the host and co-hosts; the program preview to 
     'the grid pane is control-only, and its arrow lives in its own head',
   );
 
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   assert.match(source, /function renderGridPreview\(\)/, 'the grid preview renders');
   assert.match(source, /function gridPreviewSources\(\)/, 'it previews the grid sources');
   assert.match(source, /import \{ gridColumnsFor \} from '\/shared\/layout\.js'/, 'it reuses the program grid maths');
@@ -217,7 +275,7 @@ test('the page offers a People tab with the roster, roles and passwords', () => 
   assert.match(HTML, /id="btn-room-chat"/, 'and so is Chat');
   assert.match(HTML, /option value="visitor"/, 'visitors can join without a password');
 
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   assert.match(source, /CLIENT\.MEMBER_ROLE/, 'the roster can grant roles');
   assert.match(source, /CLIENT\.ROOM_UPDATE/, 'the host can rotate the passwords');
 });
@@ -243,9 +301,16 @@ test('the page offers breakout controls and scopes the call to the room', () => 
   ]) {
     assert.ok(HTML.includes(`id="${id}"`), `${id} exists in the page`);
   }
-  assert.ok(/id="breakout-panel"[^>]*data-requires="control"/.test(HTML), 'the breakout panel is host-only');
+  // The panel is for everyone - a breakout room is somewhere to go - and the controls
+  // inside it are the host's.
+  assert.match(HTML, /<div id="breakout-panel" class="credentials">/, 'the breakout panel is for everyone');
+  assert.match(
+    HTML,
+    /data-requires="control"[\s\S]{0,300}?id="btn-create-breakouts"/,
+    'with creating and opening the rooms gated to the host',
+  );
 
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   assert.match(source, /function meetingPeerIds\(\)/, 'the call is scoped to the current room');
   assert.match(source, /roomKeyOf/, 'members are compared by room');
 
@@ -274,10 +339,10 @@ test('the participants panel and the camera picker act immediately', () => {
   }
 
   // The join call must carry the password, or a host claim from the UI fails.
-  const socket = fs.readFileSync(path.join(CLIENT_DIR, 'ws.ts'), 'utf8');
+  const socket = readClient('ws');
   assert.match(socket, /join\(\{ roomId, name, role, password \}\)/, 'the password is forwarded on join');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /Nothing ticked\? Then act on what is already published/, 'the picker acts on what is published');
   // The picker stays open: the host works through several devices in a row.
   const addSelected = /async function addSelectedDevices\([\s\S]*?\n\}/.exec(app);
@@ -293,18 +358,15 @@ test('the participants panel and the camera picker act immediately', () => {
   assert.match(app, /function unmuteMe\(\)/, 'unmute me turns the microphone back on');
   assert.match(app, /class: 'person-avatar'/, 'rows carry a Zoom-style avatar');
 
-  // Every participant controls their own media on their own tile.
-  assert.match(app, /function myTileActions\(\)/, 'my tile carries mic and camera buttons');
-  assert.match(app, /function updateMyTileActions\(/, 'the tile buttons are updated in place');
-  assert.match(app, /dataset: \{ tile: 'mic' \}/, 'the tile has a microphone button');
-  assert.match(app, /dataset: \{ tile: 'camera' \}/, 'the tile has a camera button');
-  assert.match(app, /dataset: \{ tile: 'grid' \}/, 'a viewer can ask for the grid from their tile');
-  assert.match(app, /dataset: \{ tile: 'air' \}/, 'a viewer can ask for the air from their tile');
-  assert.match(app, /if \(isMe\) children\.push\(myTileActions\(\)\)/, 'only my tile gets the controls');
+  // A viewer asks to be shown from the People list; a host moderates on the tile they
+  // are looking at. My own microphone and camera are the meeting bar's, in the room.
+  assert.match(app, /function myShowControls\(\)/, 'the people list carries the asking controls');
+  assert.match(app, /Ask the host to put \$\{source\.label\} in the grid/, 'a viewer can ask for the grid');
+  assert.match(app, /function tileTools\(tile, member\)/, 'and a host moderates on the tile itself');
 });
 
 test('the program preview is refreshed whenever sources or the program change', () => {
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   assert.match(source, /function syncCompositorSources\(\)/, 'the compositor sync helper exists');
 
   const handler = (constant, param) =>
@@ -350,10 +412,12 @@ test('cameras live in the Share picker and every pane collapses from its own hea
   assert.ok(!HTML.includes('id="btn-open-devices"'), 'and so is its button');
   assert.ok(!HTML.includes('id="source-grid"'), 'with nothing left of it behind');
 
-  // The panes that remain are addressable, and the old inline buttons are gone.
-  for (const pane of ['grid', 'participants', 'sidebar']) {
+  // The panes that remain are addressable, and the old inline buttons are gone. The
+  // people are no longer one of them: they are the room's own view.
+  for (const pane of ['grid', 'sidebar']) {
     assert.ok(new RegExp(`data-pane="${pane}"`).test(HTML), `${pane} is a pane`);
   }
+  assert.ok(!new RegExp('data-pane="participants"').test(HTML), 'the people are not a pane any more');
   assert.ok(!new RegExp('data-pane="sources"').test(HTML), 'the sources pane is no longer one');
   assert.ok(!HTML.includes('id="btn-add-camera"'), 'the inline camera buttons are gone');
   assert.ok(!HTML.includes('id="btn-add-all-cameras"'), 'the inline camera buttons are gone');
@@ -362,7 +426,7 @@ test('cameras live in the Share picker and every pane collapses from its own hea
     'the grid arrangement is host-only, and its arrow lives in its own head',
   );
 
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   assert.match(source, /function applyPaneVisibility\(\)/, 'panes can be hidden');
   assert.match(source, /localStorage\.setItem\(PANE_KEY/, 'the choice persists');
   assert.match(source, /function renderDevicePicker\(\)/, 'the picker lists devices');
@@ -381,7 +445,7 @@ test('a dropped socket is visible, retryable and never loses the room', () => {
   assert.ok(HTML.includes('id="btn-retry-connection"'), 'the banner has a retry button');
   assert.ok(HTML.includes('id="connection-banner-text"'), 'the banner says what is happening');
 
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   assert.match(source, /function showConnectionBanner\(/, 'the banner can be shown');
   assert.match(source, /function retryConnection\(/, 'the connection can be retried by hand');
   assert.match(source, /socket\.on\('close'[\s\S]*?showConnectionBanner\(/, 'a dropped socket is announced');
@@ -429,7 +493,7 @@ test('a server push reaches its handler as the payload, never as the envelope', 
   );
 
   // The transport is the one place that decides this, for every push.
-  const socket = fs.readFileSync(path.join(CLIENT_DIR, 'ws.ts'), 'utf8');
+  const socket = readClient('ws');
   assert.match(socket, /this\._emit\(message\.type, pushPayload\(message\)\)/, 'the socket dispatches the payload');
 });
 
@@ -442,7 +506,7 @@ test('a host with no room password sets one on its own page', () => {
   assert.ok(!HTML.includes('id="password-dialog"'), 'the old in-room dialog is gone');
   assert.ok(HTML.includes('id="btn-generate-passwords"'), 'passwords can also be generated from the People tab');
 
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   assert.match(source, /function showPasswordPage\(\)/, 'the page is shown on the way in');
   assert.match(source, /function roomNeedsHostPassword\(\)[\s\S]*?requiresHostPassword === false/,
     'it keys off the room needing a password, not a generated one');
@@ -458,7 +522,7 @@ test('a host with no room password sets one on its own page', () => {
 });
 
 test('the password page sits between the join form and the room', () => {
-  const source = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const source = readClient('app');
   // Three screens, one at a time: landing, password page, studio.
   assert.match(source, /if \(landing\) landing\.classList\.toggle\('hidden', inRoom\)/, 'the landing gives way to a room');
   assert.match(
@@ -481,7 +545,7 @@ test('the program preview reaches the whole room as picture and sound', () => {
   assert.ok(HTML.includes('id="program-feed"'), 'the page can show the received program feed');
   assert.ok(HTML.includes('id="program-feed-pill"'), 'and says when it is the live program');
 
-  const mesh = fs.readFileSync(path.join(CLIENT_DIR, 'webrtc.ts'), 'utf8');
+  const mesh = readClient('webrtc');
   assert.match(mesh, /setProgramStream\(stream, peerIds = null\)/, 'the mesh can carry the program');
   assert.match(mesh, /programPeers/, 'the program gets its own peer connections');
   assert.match(mesh, /const PROGRAM_KIND = 'program'/, 'and its own signal marker');
@@ -489,7 +553,7 @@ test('the program preview reaches the whole room as picture and sound', () => {
   assert.match(mesh, /_emit\('program-stream'/, 'incoming program tracks are announced');
   assert.match(mesh, /_publishProgramTracks\(peer\)/, 'the program tracks are added to each peer');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /function programOwnerId\(\)/, 'the host owns the program picture');
   assert.match(app, /function syncProgramFeed\(\)/, 'the feed follows the owner');
   assert.match(app, /function renderProgramFeed\(\)/, 'the received feed is rendered');
@@ -502,7 +566,7 @@ test('the program preview reaches the whole room as picture and sound', () => {
 });
 
 test('a camera published by anyone is seen by everyone in the room', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /async function ensureMesh\(\)/, 'the mesh starts without pressing Join call');
   assert.match(app, /async function publishToRoom\(stream\)/, 'a captured stream goes to the room');
   assert.match(app, /state\.camera\.addEventListener\('change'[\s\S]*?publishToRoom\(captured\)/, 'capturing media publishes it');
@@ -524,7 +588,7 @@ test('a camera published by anyone is seen by everyone in the room', () => {
 });
 
 test('an announcement countdown is offered in the form and ticks', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /name: 'countdown', label: 'Countdown \(seconds, 0 = none\)'/, 'the announcement form has it');
   assert.match(app, /scene\.payload\.countdownMs = Number\(data\.get\('countdown'\)/, 'it is sent in milliseconds');
   assert.match(
@@ -534,7 +598,7 @@ test('an announcement countdown is offered in the form and ticks', () => {
   );
   assert.match(app, /sceneTicker = setTimeout\(renderSceneCurrent, 1000\)/, 'the status line repaints each second');
 
-  const compositor = fs.readFileSync(path.join(CLIENT_DIR, 'compositor.ts'), 'utf8');
+  const compositor = readClient('compositor');
   assert.match(
     compositor,
     /overlayDrawModel\(this\.scene, \{ width: W, height: H, now: Date\.now\(\) \}\)/,
@@ -557,16 +621,15 @@ test('the room is the view: the grid fills it, the studio is a drawer', () => {
   assert.doesNotMatch(HTML, /class="remote-grid"/, 'the old grid div is gone');
   assert.equal((HTML.match(/id="remote-grid"/g) || []).length, 1, 'and there is only one room grid');
 
-  // The studio holds the *actions* - the people, the grid arrangement and the tabs.
-  // The program is not one of them any more: it lives in the room.
+  // The studio holds the *actions* - the studio's own tabs, and under them the grid
+  // arrangement. The people and the program are not in here: they are the room.
   const panes = /<div class="studio-panes layout hidden" id="studio-panes">([\s\S]*?)<\/div>\s*<\/main>/.exec(HTML);
   assert.ok(panes, 'the studio drawer holds the panes');
-  const order = ['participants-panel', 'grid-panel', 'sidebar']
+  const order = ['sidebar', 'grid-panel']
     .map((name) => ({ name, at: panes[1].indexOf(name) }));
   for (const entry of order) assert.ok(entry.at >= 0, `${entry.name} is still there`);
-  for (let index = 1; index < order.length; index += 1) {
-    assert.ok(order[index].at > order[index - 1].at, `${order[index].name} still follows ${order[index - 1].name}`);
-  }
+  assert.ok(order[1].at > order[0].at, 'the studio comes up, and the grid preview is under it');
+  assert.ok(!panes[1].includes('participants-panel'), 'the "in this room" panel is gone from the studio');
   assert.ok(!panes[1].includes('program-panel'), 'the program preview is out of the studio');
   assert.ok(!panes[1].includes('sources-panel'), 'and so are the cameras');
 
@@ -577,9 +640,9 @@ test('the room is the view: the grid fills it, the studio is a drawer', () => {
   assert.match(css, /\.room-tile \.badge-air \{/, 'whoever is on air says so on their tile');
   assert.match(css, /\.room-tile\.speaking \{ border-color: var\(--ok\);/, 'and whoever is talking is outlined');
   assert.match(css, /\.room-toolbar \{[\s\S]{0,220}?border-radius: 999px;/, 'the toolbar floats');
-  assert.match(css, /\.self-view \{[\s\S]{0,200}?position: absolute; right: 10px; bottom: 10px;/, 'the self view sits in the corner');
+  assert.match(css, /\.self-view \{[\s\S]{0,260}?position: absolute; right: 10px; bottom: 68px;/, 'the self view sits above the meeting bar');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /function renderRoomGrid\(\)/, 'one renderer paints the room');
   assert.match(app, /function wireRoomToolbar\(\)/, 'one place wires the bar');
   assert.match(app, /function updateRoomToolbar\(\)/, 'and one place keeps it honest');
@@ -588,27 +651,27 @@ test('the room is the view: the grid fills it, the studio is a drawer', () => {
   assert.match(app, /state\.speaking\?\.setMuted\(member\.id, Boolean\(member\.muted\)\);/, 'the room is heard through one mixer, and a muted member is really silent');
 });
 
-test('the program picture owns the width, the room sits under it, the rest is tabs', () => {
+test('the studio comes up, the grid preview fills what is under it', () => {
   const layout = /<div class="studio-panes layout hidden" id="studio-panes">([\s\S]*?)<\/div>\s*<\/main>/.exec(HTML);
   assert.ok(layout, 'the layout exists');
-  const order = ['participants-panel', 'grid-panel', 'sidebar']
+  const order = ['sidebar', 'grid-panel']
     .map((name) => ({ name, at: layout[1].indexOf(name) }))
     .filter((entry) => entry.at >= 0)
     .sort((a, b) => a.at - b.at)
     .map((entry) => entry.name);
-  assert.deepEqual(
-    order.slice(0, 2),
-    ['participants-panel', 'grid-panel'],
-    'the room comes first, the grid arrangement under it',
-  );
-  assert.ok(order.includes('sidebar'), 'the studio controls live in the tabbed sidebar');
+  assert.deepEqual(order, ['sidebar', 'grid-panel'], 'the studio first, the grid arrangement under it');
   assert.ok(
-    /\.layout > \.participants-panel,\s*\n\.layout > \.grid-panel \{ grid-column: 1 \/ -1; \}/.test(CSS),
-    'both span the whole width',
+    /\.layout > \.sidebar \{ grid-row: 1; \}[\s\S]{0,120}?\.layout > \.stage \{ grid-row: 2;/.test(CSS),
+    'one column, studio on top and the grid under it',
+  );
+  assert.ok(
+    /\.stage > \.grid-panel \{[\s\S]{0,140}?grid-template-rows: auto auto minmax\(0, 1fr\);/.test(CSS),
+    'and the grid panel fills the height it is given',
   );
   // Every pane collapses from an arrow in its own head, and comes back the same
-  // way - the top bar keeps only who/where/state/leave.
-  for (const pane of ['participants', 'grid', 'sidebar']) {
+  // way - the top bar keeps only who/where/state/leave. The people are not a pane any
+  // more: they are the room, and the grid preview is what is left in the studio.
+  for (const pane of ['grid', 'sidebar']) {
     assert.ok(
       new RegExp(`class="pane-toggle" data-pane="${pane}"`).test(HTML),
       `${pane} has a collapse arrow`,
@@ -616,22 +679,22 @@ test('the program picture owns the width, the room sits under it, the rest is ta
   }
   assert.ok(!HTML.includes('id="pane-toggles"'), 'the top bar no longer carries pane toggles');
   assert.match(CSS, /\.panel\.pane-collapsed > \*:not\(\.panel-head\) \{ display: none !important; \}/, 'a collapsed pane keeps its head');
-  assert.match(CSS, /\.participant-strip\.slide/, 'people can slide');
-  assert.match(CSS, /\.participant-strip\.grid/, 'people can be a grid');
-  assert.match(CSS, /\.participant-strip\.list/, 'a big room can be a list');
+  assert.match(CSS, /\.room-grid\.slide/, 'people can slide');
+  assert.match(CSS, /\.room-grid\.grid/, 'people can be a grid');
+  assert.match(CSS, /\.room-grid\.list/, 'a big room can be a list');
   assert.match(HTML, /id="tabs"[\s\S]*?data-tab="scenes"[\s\S]*?data-tab="recordings"/, 'the sidebar is tabs');
 });
 
 test('the microphone of anyone in the room is published when it is switched on', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
-  assert.match(app, /async function ensureMicrophone\(\)/, 'a microphone is added on demand');
+  const app = readClient('app');
+  assert.match(app, /async function ensureMicrophone\(\{ announce = Boolean\(state\.roomId\) \}: any = \{\}\)/, 'a microphone is added on demand');
   assert.match(app, /if \(!mute\) await ensureMicrophone\(\)/, 'unmuting makes sure there is one');
   assert.match(
     app,
     /function setLocalAudio\(enabled\)[\s\S]*?if \(enabled\)[\s\S]{0,400}?publishToRoom\(stream\)/,
     'switching it on publishes it to the room',
   );
-  assert.match(app, /const microphone = await ensureMicrophone\(\)/, 'the call can be joined with a mic alone');
+  assert.match(app, /await ensureMicrophone\(\);/, 'the call can be joined with a mic alone');
   assert.match(
     app,
     /find\(\(entry\) => entry\.stream\?\.getAudioTracks\?\.\(\)\.length\)/,
@@ -640,16 +703,16 @@ test('the microphone of anyone in the room is published when it is switched on',
 });
 
 test('every published feed keeps its identity, so screens can go on the program', () => {
-  const devices = fs.readFileSync(path.join(CLIENT_DIR, 'devices.ts'), 'utf8');
+  const devices = readClient('devices');
   assert.match(devices, /streamId: stream\?\.id \|\| null/, 'the sharer announces the stream it published');
   assert.match(devices, /attachRemoteSource\(\{ id, label = null, stream, peerId = null, kind = 'virtual' \}\)/, 'a peer feed can be attached under its own id');
 
-  const mesh = fs.readFileSync(path.join(CLIENT_DIR, 'webrtc.ts'), 'utf8');
+  const mesh = readClient('webrtc');
   assert.match(mesh, /peer\.streams\.set\(stream\.id, stream\)/, 'the mesh keeps every feed a peer publishes');
   assert.match(mesh, /this\._emit\('stream', \{ peerId, streamId: stream\.id, stream, track \}\)/, 'and names it');
   assert.match(mesh, /_dropPeerStreams\(peerId, peer\)/, 'and drops them one at a time');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /local\.get\(`stream:\$\{source\.meta\?\.streamId\}`\)/, 'a source is matched to the feed it published');
   assert.match(app, /entry\.meta\?\.streamId === detail\.streamId/, 'a received feed is matched to its source');
   assert.match(app, /attachRemoteSource\(\{[\s\S]{0,400}?kind: announced\.kind/, 'a viewer screen is attached for the program');
@@ -681,7 +744,7 @@ test('the landing page gets you in; the top bar keeps only who, where, state and
   assert.ok(!header[0].includes('id="btn-leave-room"'), 'the top bar carries no Leave button');
   assert.match(CSS, /\.room-tool\.danger \{/, 'the meeting bar\'s Leave is the red one');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /function renderIdentity\(\)/, 'the top bar says who and where');
   assert.match(app, /function showPasswordPage\(\)/, 'the password lives on its own page');
   assert.match(app, /function skipPasswordPage\(\)/, 'which can be skipped');
@@ -690,7 +753,7 @@ test('the landing page gets you in; the top bar keeps only who, where, state and
 });
 
 test('the platform and the room get the real on-air video, not a canvas re-render', () => {
-  const compositor = fs.readFileSync(path.join(CLIENT_DIR, 'compositor.ts'), 'utf8');
+  const compositor = readClient('compositor');
   assert.match(compositor, /programVideoTrack\(\)/, 'the program picks a video track');
   assert.match(compositor, /if \(this\.scene\) return this\.videoTrack;/, 'an overlay needs the canvas');
   assert.match(
@@ -705,21 +768,26 @@ test('the platform and the room get the real on-air video, not a canvas re-rende
   );
   assert.match(compositor, /const video = this\.programVideoTrack\(\);/, 'the program stream uses it');
 
-  const publisher = fs.readFileSync(path.join(CLIENT_DIR, 'publisher.ts'), 'utf8');
+  const publisher = readClient('publisher');
   assert.match(publisher, /syncVideoTrack\(\)/, 'a live broadcast follows the on-air video');
   assert.match(publisher, /const source = stream \|\| this\.compositor\.programStream\(\);/, 'the encoder takes a stream');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /function refreshProgramVideo\(\)/, 'the studio re-points the encoder');
   assert.match(app, /state\.publisher\?\.syncVideoTrack\?\.\(\)/, 'through the publisher');
 });
 
 test('a big room is a list with controls; a small one slides or grids', () => {
-  assert.ok(HTML.includes('id="people-view"'), 'the room has a view switch');
+  // The switch sits in the room bar, next to the room it belongs to, and appears with
+  // the People view rather than living in a panel of its own.
+  const bar = /<header class="room-bar">([\s\S]*?)<\/header>/.exec(HTML);
+  assert.ok(bar, 'the room bar exists');
+  assert.match(bar[1], /id="people-view"/, 'the room has a view switch');
+  assert.ok(!/id="studio-panes"[\s\S]*?id="participant-strip"/.test(HTML), 'and it is not in the studio any more');
   for (const view of ['slide', 'grid', 'list']) {
-    assert.ok(HTML.includes(`data-view="${view}"`), `${view} is offered`);
+    assert.ok(bar[1].includes(`data-view="${view}"`), `${view} is offered`);
   }
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /const PEOPLE_LIST_LIMIT = 50;/, 'fifty people is the turning point');
   assert.match(
     app,
@@ -727,16 +795,21 @@ test('a big room is a list with controls; a small one slides or grids', () => {
     'a big room defaults to the list, a small one to slides',
   );
   assert.match(app, /function setPeopleView\(view\)/, 'the choice can be made');
-  assert.match(app, /strip\.className = `participant-strip \$\{view\}`;/, 'and is applied to the room');
+  assert.match(app, /grid\.className = `room-grid \$\{view\}`;/, 'and is applied to the room grid');
+  assert.match(
+    app,
+    /\$\('#people-view'\)\?\.classList\.toggle\('hidden', wanted === 'program'\);/,
+    'the switch shows itself with the People view',
+  );
 });
 
 test('a coloured dot says who is host, who is co-host and who is watching', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /function roleDot\(role\)/, 'there is a role dot');
   assert.match(app, /class: `role-dot role-\$\{role \|\| 'viewer'\}`/, 'it is coloured by role');
-  // The room tiles, the People tab and the meeting tiles all carry it.
+  // The room tiles, the People list and the meeting tiles all carry it.
   const uses = app.match(/roleDot\(/g) || [];
-  assert.ok(uses.length >= 4, `the dot is used everywhere people are listed (${uses.length})`);
+  assert.ok(uses.length >= 3, `the dot is used everywhere people are listed (${uses.length})`);
   assert.match(app, /name\.append\(\s*roleDot\(member\.role\)/, 'the tiles in the room use it');
 
   assert.match(CSS, /\.role-dot\.role-host \{ background: var\(--accent\); \}/, 'the host dot is cyan');
@@ -749,7 +822,7 @@ test('a coloured dot says who is host, who is co-host and who is watching', () =
 });
 
 test('roles are dots, and the controls are proper icons', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   // The word only survives in the top bar's role pill.
   assert.match(app, /name\.append\(roleDot\(member\.role\), `\$\{member\.name\}/, 'room tiles show the dot alone');
   assert.ok(
@@ -762,8 +835,8 @@ test('roles are dots, and the controls are proper icons', () => {
     assert.ok(new RegExp(`\\b${name}:`).test(app), `${name} icon exists`);
   }
   assert.match(app, /function icon\(name, \{ size = 14 \}/, 'icons are rendered inline');
-  assert.match(app, /iconLabel\(mic, member\.muted \? 'micOff' : 'mic'/, 'the tile microphone button uses one');
-  assert.match(app, /iconLabel\(camera, member\.cameraEnabled \? 'camera' : 'cameraOff'/, 'and so does the camera button');
+  assert.match(app, /function iconOnly\(button, name, label\) \{/, 'state-changing controls are icons');
+  assert.ok((app.match(/iconOnly\(/g) || []).length >= 2, 'and the meeting controls use them');
   assert.match(app, /const name = kind === 'mic' \? \(on \? 'mic' : 'micOff'\)/, 'the People controls too');
   assert.match(app, /button\.innerHTML = icon\(shown \? \(horizontal \? 'chevronLeft' : 'chevronDown'\) : 'chevronRight'\)/, 'the pane arrows are chevrons');
   assert.ok(!/\\u\{1F3A4\}|\\u\{1F4F7\}|\\u\{1F507\}|\\u\{1F4F9\}/.test(app), 'no emoji are left');
@@ -772,9 +845,9 @@ test('roles are dots, and the controls are proper icons', () => {
 });
 
 test('the client takes STUN and TURN from the server', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /state\.meeting\.setIceServers\(message\.iceServers\)/, 'the welcome configures the mesh');
-  const mesh = fs.readFileSync(path.join(CLIENT_DIR, 'webrtc.ts'), 'utf8');
+  const mesh = readClient('webrtc');
   assert.match(mesh, /setIceServers\(servers = \[\]\)/, 'the mesh accepts a server list');
   assert.match(mesh, /this\.iceServers = servers;/, 'and uses it for new connections');
   const config = fs.readFileSync(path.join(rootDir, 'server', 'config.ts'), 'utf8');
@@ -796,7 +869,7 @@ test('the Share button in the room opens the camera picker for everyone', () => 
   }
   assert.match(CSS, /\.share-button \{/, 'and it is styled as an action');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /\$\('#btn-share'\)\.addEventListener\('click', openSharePanel\)/, 'Share opens the picker');
   assert.match(app, /function renderDeviceDialogActions\(\)/, 'the picker adapts to the role');
   assert.match(app, /\{ studio: 'Publish to the room', grid: 'ask for grid', air: 'ask for air' \}/, 'viewers publish and ask');
@@ -826,21 +899,21 @@ test('a picture relayed over the socket reaches the room', () => {
   assert.deepEqual([...decoded.payload], [...payload], 'and so does the picture');
   assert.equal(decodeRelayFrame(new Uint8Array([9, 9, 9, 9, 9, 9, 9, 9])), null, 'nonsense decodes to nothing');
 
-  const socket = fs.readFileSync(path.join(CLIENT_DIR, 'ws.ts'), 'utf8');
+  const socket = readClient('ws');
   assert.match(socket, /_handleBinary\(event\.data\)/, 'binary frames are looked at');
   assert.match(socket, /this\._emit\('media:frame', decoded\)/, 'a relayed picture becomes an event');
   assert.match(socket, /sendRelayFrame\(header, payload\)/, 'and can be posted');
 
-  const relay = fs.readFileSync(path.join(CLIENT_DIR, 'relay.ts'), 'utf8');
+  const relay = readClient('relay');
   assert.match(relay, /export class MediaRelay extends EventTarget/, 'the relay is a module');
   assert.match(relay, /canvas\.toBlob\(resolve, 'image\/jpeg', this\.quality\)/, 'it encodes JPEG frames');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /function syncRelay\(\)/, 'the studio starts and stops it');
   assert.match(app, /function relayFallbackNeeded\(\)[\s\S]*?connectionState !== 'connected'/, 'only when peer-to-peer is not connected');
   assert.match(app, /socket\.on\('media:frame'/, 'and renders what arrives');
   assert.match(app, /attachRemoteImage\(\{/, 'relayed pictures can be composited too');
-  const compositor = fs.readFileSync(path.join(CLIENT_DIR, 'compositor.ts'), 'utf8');
+  const compositor = readClient('compositor');
   assert.match(compositor, /const isImage = video\?\.tagName === 'IMG';/, 'the compositor draws a relayed picture');
 
   const server = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
@@ -849,7 +922,7 @@ test('a picture relayed over the socket reaches the room', () => {
 });
 
 test('the relay drops late pictures instead of queueing them', () => {
-  const relay = fs.readFileSync(path.join(CLIENT_DIR, 'relay.ts'), 'utf8');
+  const relay = readClient('relay');
   // Conflation: one frame at a time, and the newest wins.
   assert.match(relay, /if \(this\._busy\) \{\s*\n\s*this\.dropped \+= 1;\s*\n\s*return;/, 'a busy encoder drops the frame');
   assert.match(relay, /maxBufferedBytes = 64 \* 1024/, 'the socket is kept almost empty');
@@ -862,13 +935,13 @@ test('the relay drops late pictures instead of queueing them', () => {
   assert.match(relay, /this\._windowBytes \+= payload\.byteLength;/, 'what actually went out is measured');
   assert.match(relay, /noteNetworkHint\(connection\)/, 'and a network change starts the ladder again');
 
-  const quality = fs.readFileSync(path.join(CLIENT_DIR, 'quality.ts'), 'utf8');
+  const quality = readClient('quality');
   assert.match(quality, /\{ name: '1080p', width: 1920, height: 1080, fps: 3, quality: 0\.68, kbps: 3200 \}/, '1080p is the top rung');
   assert.match(quality, /if \(connection\.saveData\) return ladder\.length - 1;/, 'save-data is honoured');
   assert.match(quality, /if \(struggling\) \{\s*\n\s*\/\/ Down at once/, 'a struggling link steps down at once');
   assert.match(quality, /if \(this\.index > 0 && now - this\.comfortableSince >= this\.upAfterMs\)/, 'and climbs only after a comfortable window');
 
-  const mesh = fs.readFileSync(path.join(CLIENT_DIR, 'webrtc.ts'), 'utf8');
+  const mesh = readClient('webrtc');
   assert.match(mesh, /export const SCREEN_MAX_BITRATE_BPS = 6_000_000;/, 'a screen share is allowed real bandwidth');
   assert.match(mesh, /export const CAMERA_MAX_BITRATE_BPS = 2_500_000;/, 'and a camera a sensible ceiling');
   assert.match(mesh, /encoding\.maxBitrate = maxBitrate;/, 'the sender is told what the feed is worth');
@@ -877,33 +950,39 @@ test('the relay drops late pictures instead of queueing them', () => {
   assert.match(mesh, /if \(track && !hinted && 'contentHint' in track\) track\.contentHint = detail \? 'detail' : 'motion';/, 'and the encoder is told what the pixels are for, once');
   assert.match(mesh, /if \(pc\.connectionState === 'connected'\) this\._tuneConnection\(peer\);/, 'applied once the path is up, where it sticks');
 
-  const devices = fs.readFileSync(path.join(CLIENT_DIR, 'devices.ts'), 'utf8');
+  const devices = readClient('devices');
   assert.match(devices, /track\.contentHint = 'motion';/, 'a camera says motion');
   assert.match(devices, /track\.contentHint = 'detail';/, 'a shared screen says detail');
   assert.match(devices, /width: \{ ideal: 1920 \}, height: \{ ideal: 1080 \}/, 'and the camera is asked for 1080p');
   assert.match(relay, /tns: nsToWire\(capturedNs\)/, 'every picture carries a nanosecond capture stamp');
   assert.match(relay, /this\._capturedNs = this\.socket\.serverNowNs\?\.\(\) \?\? monotonicNs\(\);/, 'taken when the frame was drawn, not when it finished encoding');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /const lag = relayLagNs\(header, nowNs\);/, 'measured on the shared nanosecond clock');
   assert.match(app, /if \(!header\?\.warm && isStaleNs\(lag\.capturedNs, nowNs, RELAY_STALE_NS\)\) \{\s*\n\s*relayStale \+= 1;\s*\n\s*return;/, 'so a picture that arrives too late is thrown away, in nanoseconds (unless it is a warm still)');
-  assert.match(app, /function setTransport\(tile, text, kind = ''\)/, 'each tile says which path it is on');
-  assert.match(app, /setTransport\(tile, `relay \$\{formatLagNs\(lag\?\.totalNs\)\}`, 'relay'\)/, 'with the relay delay in the unit that fits');
-  assert.match(app, /to server \$\{formatLagNs\(lag\.inboundNs\)\}/, 'and which hop it was lost on');
-  assert.match(app, /if \(stream\) setTransport\(tile, 'P2P', 'p2p'\)/, 'and P2P when the live connection carries it');
-  assert.match(CSS, /\.participant-tile \.transport\.p2p \{ color: var\(--ok\); font-weight: 600; \}/, 'P2P is green');
-  assert.match(CSS, /\.participant-tile \.transport\.relay \{ color: var\(--warn\); \}/, 'the relay shows its lag in amber');
+  // A relayed picture says how far behind it is - and which hop it was lost on - on the
+  // tile it lands on, rather than in a line under it.
+  assert.match(app, /function showRelayedPicture\(peerId, url, lag: any = null\)/, 'a relayed picture lands on a tile');
+  assert.match(app, /const tile = document\.querySelector\(`#remote-grid \[data-peer="\$\{peerId\}"\]`\);/, 'the room grid is where it lands');
+  assert.match(app, /tile\.title = lag\?\.inboundNs != null/, 'and the tile reports the lag');
+  assert.match(app, /to server \$\{formatLagNs\(lag\.inboundNs\)\}/, 'including which hop it was lost on');
+  assert.match(
+    app,
+    /path: tile\.querySelector\('video'\) \? 'video' : tile\.querySelector\('img\.tile-picture'\) \? 'relay' : 'none',/,
+    'and the diagnostics report which path each tile is on',
+  );
 });
 
 test('the voice relay keeps the delay flat, like the pictures', () => {
-  const audio = fs.readFileSync(path.join(CLIENT_DIR, 'relay-audio.ts'), 'utf8');
+  const audio = readClient('relay-audio');
   // Capture: 21 ms slices at 48 kHz, and a silent sink so nobody hears themselves.
   assert.match(audio, /const AUDIO_FRAME_SAMPLES = 1024;/, 'voice travels in 21 ms slices');
   assert.match(audio, /context\.createScriptProcessor\(AUDIO_FRAME_SAMPLES, channels, channels\)/, 'taken from the microphone, or in stereo from a shared screen');
   assert.match(audio, /sink\.gain\.value = 0;/, 'and never played back into the room speakers');
   assert.match(audio, /kind: 'audio',/, 'tagged as voice, so the server gives it its own budget');
-  assert.match(audio, /rate: this\.context\?\.sampleRate \|\| RELAY_AUDIO_RATE,/, 'at the rate it was captured');
-  assert.match(audio, /pcm\.buffer,/, 'sent as raw 16-bit samples when there is no encoder');
+  assert.match(audio, /rate: RELAY_PCM_RATE,/, 'at the standard 48 kHz, whatever the device mixed at');
+  assert.match(audio, /codec: bits === 24 \? 'pcm24' : 'pcm16',/, 'and sent as raw samples at the depth the socket can carry');
+  assert.match(audio, /pcm\.buffer,/, '...which is what goes on the wire');
   // Never queue: drop instead, and skip the quiet parts (of the PCM fallback).
   assert.match(audio, /if \(backlog > this\.maxBufferedBytes\) \{\s*\n\s*this\.dropped \+= 1;/, 'a behind socket drops voice rather than queueing it');
   assert.match(audio, /if \(quiet && now < this\.silentUntil\) return;/, 'silence is not worth its bytes');
@@ -917,11 +996,11 @@ test('the voice relay keeps the delay flat, like the pictures', () => {
   assert.match(audio, /if \(isStaleNs\(lag\.capturedNs, nowNs, RELAY_AUDIO_STALE_NS\)\) \{/, 'a slice that arrives too late is thrown away, in nanoseconds');
   assert.match(audio, /const lag = relayLagNs\(header, nowNs\);/, 'voice is measured on the same shared clock');
   assert.match(audio, /tns: nsToWire\(this\.socket\.serverNowNs\?\.\(\) \?\? monotonicNs\(\)\)/, 'and stamped in nanoseconds too');
-  assert.match(audio, /view\.getInt16\(i \* 2, true\)/, 'samples are read safely from the frame buffer');
+  assert.match(audio, /bits === 24 \? readPcm24\(view, i \* RELAY_PCM_BYTES\) \/ RELAY_PCM_MAX : view\.getInt16\(i \* 2, true\) \/ 32768/, '24-bit samples are read safely from the frame buffer, and the older 16-bit slice still decodes');
   // A shared context, resumed on the same gesture as the program audio.
   assert.match(audio, /export function resumeRelayedAudio\(\)/, 'the same user gesture starts it');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /if \(header\?\.kind === 'audio'\) playRelayedAudio\(header, payload\);/, 'voice frames are played');
   assert.match(app, /function syncAudioRelay\(\)/, 'and the microphone joins the relay');
   assert.match(app, /const LOCAL_MEDIA_KINDS = new Set\(\['camera', 'screen', 'audio'\]\);/, 'only what I captured is relayed');
@@ -939,7 +1018,7 @@ test('the voice relay keeps the delay flat, like the pictures', () => {
 });
 
 test('the program picture does not blink when a relayed frame arrives', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   // The decoded frame is what the compositor draws, so it has to reach it.
   assert.match(app, /frame: media\?\.frame \|\| null,/, 'decoded frames travel with the source');
   assert.match(app, /lastFrame: media\?\.lastFrame \|\| null,/, 'and so does the one before it');
@@ -947,25 +1026,25 @@ test('the program picture does not blink when a relayed frame arrives', () => {
   assert.match(app, /if \(relayFrameSeq\.get\(from\) !== seq\) \{\s*\n\s*bitmap\?\.close\?\.\(\);\s*\n\s*return;/, 'and a slow decode cannot paint over a newer frame');
   assert.match(app, /relayFrameSeq\.delete\(peerId\);/, 'a peer who leaves is forgotten');
 
-  const devices = fs.readFileSync(path.join(CLIENT_DIR, 'devices.ts'), 'utf8');
+  const devices = readClient('devices');
   assert.match(devices, /source\.lastFrame = source\.frame \|\| null;/, 'two frames are kept, so a refresh is never blank');
   assert.match(devices, /source\.lastFrame\.close\?\.\(\);/, 'and the older one is released');
 
-  const compositor = fs.readFileSync(path.join(CLIENT_DIR, 'compositor.ts'), 'utf8');
+  const compositor = readClient('compositor');
   assert.match(compositor, /const decoded = source\.frame \|\| source\.lastFrame \|\| null;/, 'the compositor draws a decoded frame');
   assert.match(compositor, /const ready = Boolean\(decoded\) \|\|/, 'so a live tile never falls back to the placeholder');
   assert.match(compositor, /if \(source\.meta\?\.relayed\) return this\.videoTrack;/, 'a relayed picture never becomes the outgoing track');
   assert.match(compositor, /const same = current && current\.length === tracks\.length && tracks\.every\(\(track\) => current\.includes\(track\)\);/, 'the program stream object stays stable while its tracks do');
   assert.match(compositor, /if \(!same\) this\._programStream = new MediaStream\(tracks\);/, 'a new stream only when the tracks really changed');
 
-  const publisher = fs.readFileSync(path.join(CLIENT_DIR, 'publisher.ts'), 'utf8');
+  const publisher = readClient('publisher');
   assert.match(publisher, /this\._rebuildTimer = setTimeout\(\(\) => \{/, 'a burst of changes is coalesced into one rebuild');
   assert.match(publisher, /if \(!settled \|\| settled === live\) return;/, 'and a change that settles back needs no rebuild');
   assert.match(publisher, /rebuilds: this\._rebuilds,/, 'the rebuild count is reported');
 });
 
 test('a camera tile is never rebuilt under the video that is playing', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   // A stream event fires for every track and every renegotiation; rebuilding the
   // element each time is what makes the room's cameras flicker.
   assert.match(app, /if \(!tile\) \{\s*\n\s*tile = el\('div', \{ class: 'room-tile', dataset: \{ peer: member\.id \} \}/, 'the tile is reused');
@@ -980,14 +1059,18 @@ test('a camera tile is never rebuilt under the video that is playing', () => {
   assert.match(css, /\.speaking \.wave i \{ color: var\(--ok\); animation-play-state: running; \}/, 'and animates only for whoever is talking');
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.wave i \{ animation: none; height: 8px; \}/, 'with respect for reduced motion');
 
-  const audio = fs.readFileSync(path.join(CLIENT_DIR, 'room-audio.ts'), 'utf8');
+  const audio = readClient('room-audio');
   // The room's voices are mixed in one place: one context to resume, one gain per
   // peer, and the meter that draws the waves comes from the same graph.
   assert.match(audio, /export class RoomAudio extends EventTarget/, 'the room has one mixer');
   assert.match(audio, /source\.connect\(analyser\);/, 'every voice is metered');
   assert.match(audio, /gain\.connect\(this\.master\);/, 'and played, unless it is my own microphone');
   assert.match(audio, /this\.master\.connect\(context\.destination\);/, 'everything audible goes through one master gain');
-  assert.match(audio, /gain\.gain\.value = muted \|\| this\.ducked \|\| !monitor \? 0 : 1;/, 'a muted or ducked voice is really silent');
+  assert.match(
+    audio,
+    /const wanted = monitor && !muted && !this\.ducked \? 1 : 0;[\s\S]{0,60}?gain\.gain\.value = wanted;/,
+    'a muted or ducked voice is really silent',
+  );
   assert.match(audio, /const wanted = entry\.monitor && !entry\.muted && !this\.ducked \? 1 : 0;/, 'and the gain follows the state');
   assert.match(audio, /if \(now - this\._lastResumeAt > 2000\) \{/, 'a suspended context is brought back by the watchdog');
   assert.match(audio, /rebuild\(\) \{/, 'and the whole mix can be re-attached');
@@ -995,7 +1078,7 @@ test('a camera tile is never rebuilt under the video that is playing', () => {
   assert.match(audio, /track: track \? \{ muted: track\.muted, readyState: track\.readyState, enabled: track\.enabled \} : null,/, 'and the incoming track\'s health is reported');
   assert.match(audio, /state: this\.state,/, 'the mixer reports what it is doing');
 
-  const appSource = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const appSource = readClient('app');
   assert.match(appSource, /const node = el\('video', \{ autoplay: true, playsInline: true, muted: true \}\);/, 'tile videos carry the picture only, never the sound');
   assert.match(appSource, /state\.speaking\?\.track\(detail\.peerId, detail\.stream, \{ muted: Boolean\(member\?\.muted\) \}\);/, 'a peer with a microphone but no camera is still heard');
   assert.match(appSource, /state\.speaking\?\.track\(state\.clientId, stream, \{ monitor: false \}\);/, 'and I never hear myself');
@@ -1017,7 +1100,7 @@ test('the program frame is the shape of the picture, with sound and picture cont
   assert.match(html, /id="btn-program-fill"/, 'and the program can fill the screen');
   assert.match(html, /id="program-blocked"/, 'a scene covering the program is announced');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /frame\.style\.setProperty\('--program-aspect'/, 'the client sets the frame\'s shape from the on-air video');
   assert.match(app, /node\.muted = Boolean\(state\.programMuted\) \|\| Boolean\(state\.breakoutId\) \|\| Boolean\(ducked\);/, 'muting the program really mutes it');
   assert.match(app, /function watchSceneExpiry\(\)/, 'nothing on air outlives its own countdown');
@@ -1031,12 +1114,12 @@ test('a newcomer is shown the room as it already is', () => {
   assert.match(server, /this\._sendWarmFrames\(session, session\.attendedRoomId \|\| studio\.id\);/, 'and hands it to whoever joins');
   assert.match(server, /const warm = encodeRelayFrame\(\{ \.\.\.decoded\.header, warm: true \}, decoded\.payload\);/, 'marked as a still, not a live frame');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /if \(!header\?\.warm && isStaleNs\(lag\.capturedNs, nowNs, RELAY_STALE_NS\)\) \{/, 'so the live staleness rule does not throw it away');
 });
 
 test('stopping the video never stops the voice', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   // The microphone is usually captured inside the camera's stream, so removing the
   // camera removes the voice - which is exactly what "the sound broke" looks like.
   assert.match(app, /async function ensureStandaloneMicrophone\(\)/, 'a microphone of its own can be made');
@@ -1075,12 +1158,16 @@ test('everything happens in the room: a split view, and popups over it', () => {
   const css = CSS;
   assert.match(css, /\.room-stage\.view-split \{[\s\S]{0,160}?grid-template-columns: minmax\(0, 1\.15fr\) minmax\(0, 1fr\);/, 'the split puts them side by side');
   assert.match(css, /\.room-stage\.view-program \.people-view \{ display: none; \}/, 'and the switcher hides one or the other');
-  // The studio floats over the room, filling the container it belongs to.
-  assert.match(css, /\.studio-panes \{[\s\S]{0,120}?position: absolute; inset: 8px;/, 'the studio is a popup over the room');
-  assert.match(css, /\.room \{ position: relative; \}/, 'and the room is what it floats over');
+  // The studio docks beside the room and the room keeps its own column: opening the
+  // studio must never hide the meeting, which is what a floating pane over the whole
+  // room did.
+  assert.match(css, /\.room\.studio-open \{[\s\S]{0,120}?grid-template-columns: minmax\(0, 1fr\) minmax\(320px, 440px\);/, 'the studio docks beside the room');
+  assert.match(css, /\.room\.studio-open > \.room-stage \{ grid-column: 1; \}/, 'and the stage keeps its own column');
+  assert.match(css, /\.room\.studio-open > \.studio-panes \{ grid-column: 2; grid-row: 2; \}/, 'with the panes in the other');
+  assert.match(css, /\.room \{ position: relative; \}/, 'the room is the container they share');
   assert.match(css, /\.share-dialog::backdrop, \.chat-dialog::backdrop, \.people-dialog::backdrop \{/, 'the popups have backdrops');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /function setStageView\(view, \{ remember = true \} = \{\}\)/, 'the view can be switched');
   assert.match(app, /return hasControl\(\) \? 'split' : 'people';/, 'a host opens on the split');
   assert.match(app, /function openShareDialog\(\)/, 'share opens a dialog');
@@ -1090,7 +1177,7 @@ test('everything happens in the room: a split view, and popups over it', () => {
 });
 
 test('feedback is heard, ducked and then restored', () => {
-  const audio = fs.readFileSync(path.join(CLIENT_DIR, 'room-audio.ts'), 'utf8');
+  const audio = readClient('room-audio');
   // A howl is loud and narrow; a voice is loud but spread out. Both matter.
   assert.match(audio, /_peakShape\(entry\) \{/, 'the shape of the sound is measured');
   assert.match(audio, /if \(entry\.freq\[index\] >= strong\) loud \+= 1;/, 'by counting how few frequencies carry it');
@@ -1104,7 +1191,7 @@ test('feedback is heard, ducked and then restored', () => {
   assert.match(audio, /this\.master\.gain\.setTargetAtTime\(value, this\.context\.currentTime, timeConstant\);/, 'ramped, because a click is its own kind of unpleasant');
   assert.match(audio, /dispatchEvent\(new CustomEvent\('feedback', \{ detail: \{ active: true, peerId: culprit, reason \} \}\)\);/, 'and whoever it was is named, with what gave it away');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /state\.speaking\.addEventListener\('feedback'/, 'the room shows the warning');
   assert.match(app, /function holdMyMicForFeedback\(\) \{/, 'and my own microphone is held down');
   assert.match(app, /function releaseMyMicForFeedback\(\) \{/, 'until the howl is gone, rather than for a fixed time');
@@ -1118,10 +1205,10 @@ test('feedback is heard, ducked and then restored', () => {
 });
 
 test('audio is promoted on both stacks: WebRTC and the relay', () => {
-  const webrtc = fs.readFileSync(path.join(CLIENT_DIR, 'webrtc.ts'), 'utf8');
-  const relay = fs.readFileSync(path.join(CLIENT_DIR, 'relay-audio.ts'), 'utf8');
-  const devices = fs.readFileSync(path.join(CLIENT_DIR, 'devices.ts'), 'utf8');
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const webrtc = readClient('webrtc');
+  const relay = readClient('relay-audio');
+  const devices = readClient('devices');
+  const app = readClient('app');
   const audio = fs.readFileSync(path.join(rootDir, 'shared', 'audio.ts'), 'utf8');
 
   // WebRTC: the Opus parameters live in the SDP, so the local description is rewritten
@@ -1154,6 +1241,12 @@ test('audio is promoted on both stacks: WebRTC and the relay', () => {
   assert.match(relay, /return scheduleRelayedBuffer\(from, buffer, ctx\);/, 'and the PCM fallback still schedules the same way');
   assert.match(relay, /context = new Ctor\(\{ sampleRate: RELAY_CAPTURE_RATE \}\);/, 'the relay context runs at 48 kHz');
   assert.match(relay, /codecs: \[\.\.\.sendCodecs\],/, 'and the codecs in use are reported');
+  // The PCM fallback is the same standard as the rest of the voice path: 48 kHz, 24-bit.
+  assert.match(audio, /export const RELAY_PCM_RATE = RELAY_CAPTURE_RATE;/, 'the fallback runs at the capture rate');
+  assert.match(audio, /export const RELAY_PCM_BITS = 24;/, 'and at 24 bits, the depth a studio records at');
+  assert.match(relay, /const pcm = this\._toPcm\(mono, bits\);/, 'the fallback encodes at the depth it can afford');
+  assert.match(relay, /const value =\s*\n\s*Math\.round\(clamped < 0 \? clamped \* \(RELAY_PCM_MAX \+ 1\) : clamped \* RELAY_PCM_MAX\) & 0xffffff;/, 'little-endian, sign-extended, full scale at both ends');
+  assert.match(relay, /function readPcm24\(view: DataView, at: number\)/, 'and the receiving end reads it back');
 
   // Devices: a microphone is processed, a shared screen is not.
   assert.match(devices, /audio: withAudio \? microphoneConstraints\(\) : false,/, 'a camera\'s microphone is opened as speech');
@@ -1166,7 +1259,7 @@ test('audio is promoted on both stacks: WebRTC and the relay', () => {
 });
 
 test('the stage shows the screen of the room I am standing in', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   const server = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
 
   // The server keeps the two apart: the parent's screen travels to everyone (a host
@@ -1197,9 +1290,9 @@ test('the stage shows the screen of the room I am standing in', () => {
 });
 
 test('a howl is caught on every path it can arrive on, not just the mixer', () => {
-  const audio = fs.readFileSync(path.join(CLIENT_DIR, 'room-audio.ts'), 'utf8');
-  const relay = fs.readFileSync(path.join(CLIENT_DIR, 'relay-audio.ts'), 'utf8');
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const audio = readClient('room-audio');
+  const relay = readClient('relay-audio');
+  const app = readClient('app');
 
   // The mixer watches audio it does not play: the relay's output and the program feed.
   assert.match(audio, /meter\(id: string, analyser: any\) \{/, 'a meter from somebody else\'s output can be watched');
@@ -1239,7 +1332,7 @@ test('the studio is only the actions, and the meeting controls are always usable
   assert.ok(!panes.includes('sources-panel'), 'no cameras pane in the studio');
   assert.ok(!panes.includes('on-air-label'), 'and no on-air box');
   assert.ok(panes.includes('grid-panel'), 'the grid arrangement is still there');
-  assert.ok(panes.includes('participant-strip'), 'and the people');
+  assert.ok(!panes.includes('participant-strip'), 'and the people are not: they are the room');
   // The host's program controls moved to the room, with the picture.
   assert.match(HTML, /<div class="program-bar">/, 'the program bar is in the room');
   assert.match(HTML, /id="program-mode" data-requires="control"/, 'with the mode buttons, host-only');
@@ -1252,7 +1345,7 @@ test('the studio is only the actions, and the meeting controls are always usable
   assert.match(HTML, /id="btn-toggle-mic"[\s\S]{0,400}?<svg class="icon"/, 'both carry an icon');
   assert.ok(!/id="btn-toggle-mic"[\s\S]{0,600}?<span>Mute<\/span>/.test(HTML), 'and no label');
   assert.ok(!/id="btn-toggle-cam"[\s\S]{0,600}?<span>Stop video<\/span>/.test(HTML), 'neither of them');
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.doesNotMatch(app, /\$\('#btn-toggle-mic'\)\.disabled/, 'nothing disables the mic button');
   assert.doesNotMatch(app, /\$\('#btn-toggle-cam'\)\.disabled/, 'nothing disables the camera button');
 
@@ -1277,7 +1370,7 @@ test('a viewer gets the program and the people, never the split or the studio', 
   assert.match(HTML, /<dialog id="chat-dialog" class="chat-dialog">/, 'and opens in front of the room');
   assert.match(HTML, /<div id="chat-dialog-body"><\/div>/, 'holding the same chat panel');
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   assert.match(app, /if \(wanted === 'split' && !hasControl\(\)\) wanted = 'people';/, 'a viewer asking for split gets the people');
   assert.match(app, /if \(next && !hasControl\(\)\) return;/, 'and nothing opens the studio for them');
   assert.match(app, /function openChatDialog\(\)/, 'chat is a popup, not a pane');
@@ -1300,7 +1393,7 @@ test('my own camera is mirrored, and nothing that goes out is', () => {
     'and so is what the grid would put out',
   );
 
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   // A shared screen is not a self portrait: the self view shows the camera, so a
   // screen share can never end up mirrored.
   assert.match(app, /const stream = myCameraSource\(\)\?\.stream \|\| null;/, 'the self view is the camera');
@@ -1328,7 +1421,7 @@ test('my own camera is mirrored, and nothing that goes out is', () => {
 });
 
 test('chat can be private, and can carry a picture', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   const html = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(rootDir, 'public', 'styles.css'), 'utf8');
   const server = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
@@ -1359,7 +1452,7 @@ test('chat can be private, and can carry a picture', () => {
 });
 
 test('participants choose a breakout room, and a host can rename one', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   const html = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(rootDir, 'public', 'styles.css'), 'utf8');
   const server = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
@@ -1369,8 +1462,14 @@ test('participants choose a breakout room, and a host can rename one', () => {
   // Anyone may walk into a room that is open - it is a choice, not an assignment.
   assert.match(server, /const movingSelf = memberId === session\.id;[\s\S]{0,340}?if \(breakoutId && !session\.studio\.breakouts\.get\(breakoutId\)\?\.open\) \{\s*\n\s*return this\._fail\(session, id, 'that breakout room is not open yet'\);/, 'joining is allowed for any open room, by the member themselves');
 
-  // The picker: the Rooms button, the dialog, and one row per room.
-  assert.match(html, /<button type="button" id="btn-room-breakout" class="room-tool hidden"/, 'there is a Rooms button on the meeting bar');
+  // The picker: the Rooms button - always on the bar, because a room is somewhere to go -
+  // the dialog, and one row per room.
+  assert.match(
+    html,
+    /<button type="button" id="btn-room-breakout" class="room-tool" title="Breakout rooms[^"]*">/,
+    'the Rooms button is on the meeting bar, rooms or not',
+  );
+  assert.match(app, /button\.classList\.remove\('hidden'\);/, 'and is never hidden again');
   assert.match(html, /<dialog id="breakout-dialog" class="breakout-dialog">/, 'and a picker to open');
   assert.match(app, /function openBreakoutPicker\(\)/, 'which lists the rooms');
   assert.match(app, /send\(CLIENT\.BREAKOUT_ASSIGN, \{ breakoutId: id \}\);/, 'and joining is one click');
@@ -1404,7 +1503,7 @@ test('participants choose a breakout room, and a host can rename one', () => {
 });
 
 test('a participant can leave a breakout room from wherever they are looking', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   const html = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(rootDir, 'public', 'styles.css'), 'utf8');
 
@@ -1437,7 +1536,7 @@ test('a participant can leave a breakout room from wherever they are looking', (
 });
 
 test('a picture can be sent in chat, and only one of ours', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   const html = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(rootDir, 'public', 'styles.css'), 'utf8');
   const server = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
@@ -1473,7 +1572,7 @@ test('a picture can be sent in chat, and only one of ours', () => {
 });
 
 test('notifications are opt-in, and never say what can be seen', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   const html = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
 
   assert.match(app, /const NOTIFY_KEY = 'quandrite\.notify';/, 'the choice is remembered');
@@ -1492,7 +1591,7 @@ test('notifications are opt-in, and never say what can be seen', () => {
 });
 
 test('a host can mute and stop a participant, and it is enforced', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   const html = fs.readFileSync(path.join(rootDir, 'public', 'index.html'), 'utf8');
   const server = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
   const studio = fs.readFileSync(path.join(rootDir, 'server', 'studio.ts'), 'utf8');
@@ -1511,9 +1610,11 @@ test('a host can mute and stop a participant, and it is enforced', () => {
   assert.match(app, /function applyRoomModeration\(\)/, 'the room\'s record is applied on joining');
   assert.match(app, /if \(!me\?\.muted\) return;[\s\S]{0,160}?setLocalAudio\(false\);/, 'so a muted microphone does not come back on by itself');
   assert.match(app, /applyRoomModeration\(\);[\s\S]{0,60}?loadRecordings\(\);/, 'as part of the join');
-  // ...and joining the call does not overrule the host either.
-  assert.match(app, /const held = Boolean\(me\?\.muted\);[\s\S]{0,120}?setLocalAudio\(!held\);/, 'joining the call respects the record');
-  assert.match(app, /send\(CLIENT\.MEMBER_UPDATE, \{ patch: \{ cameraEnabled: true, muted: held \} \}\);/, 'and says so, rather than announcing an unmute');
+  // ...and joining the call does not overrule the host either - or me: a microphone I
+  // switched off before joining stays off.
+  assert.match(app, /const mine = microphoneTracks\(\)\.length > 0 && !myMicEnabled\(\);/, 'my own pre-join choice is a mute too');
+  assert.match(app, /const held = Boolean\(me\?\.muted\) \|\| mine;[\s\S]{0,120}?setLocalAudio\(!held\);/, 'so joining the call respects the record');
+  assert.match(app, /send\(CLIENT\.MEMBER_UPDATE, \{ patch: \{ cameraEnabled: Boolean\(myCameraSource\(\)\), muted: held \} \}\);/, 'and says what the video is actually doing, rather than announcing an unmute');
   // The server keeps an individual mute, by name, so a reload does not undo it.
   assert.match(studio, /this\.mutedNames = new Set\(\);/, 'the room remembers who was muted');
   assert.match(studio, /muted: this\.mutedNames\.has\(nameKey\(memberName\)\),/, 'and they arrive muted');
@@ -1541,7 +1642,7 @@ test('a host can mute and stop a participant, and it is enforced', () => {
 });
 
 test('the program hint only sits on an empty program', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   // It used to be a static element, so it drew "add a camera" over a live picture.
   assert.match(app, /function programHasPicture\(\)/, 'the program is asked whether it has a picture');
   assert.match(app, /if \(!inBreakoutRoom\(\) && state\.programStream\) return true;/, 'an incoming feed is one, unless I am in a breakout - where the stage is that room\'s own screen');
@@ -1553,12 +1654,12 @@ test('the program hint only sits on an empty program', () => {
 });
 
 test('muting is about the microphone, and the status pills say what they mean', () => {
-  const app = fs.readFileSync(path.join(CLIENT_DIR, 'app.ts'), 'utf8');
+  const app = readClient('app');
   // A screen share has audio of its own, and muting me must not silence it.
   assert.match(app, /function microphoneTracks\(\)/, 'the microphone tracks are identified first');
   assert.match(app, /if \(source\.kind !== 'audio' && source\.kind !== 'camera'\) continue;/, 'a microphone, or the one in a camera - never a screen');
   assert.match(app, /state\.meeting\.setMicEnabled\(enabled, tracks\);/, 'and the mesh is told which they are');
-  const mesh = fs.readFileSync(path.join(CLIENT_DIR, 'webrtc.ts'), 'utf8');
+  const mesh = readClient('webrtc');
   assert.match(mesh, /setMicEnabled\(enabled, tracks = null\)/, 'so it does not reach for every audio track');
   assert.match(mesh, /this\.localStream\?\.getAudioTracks\?\.\(\) \|\| \[\]/, 'only falling back to the published stream');
 
@@ -1579,9 +1680,161 @@ test('the server keeps the socket alive and reaps dead ones', () => {
   // The served client is always the build, so say so when it is missing.
   assert.match(source, /no client build found in/, 'a missing client build is reported');
   const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
-  assert.equal(pkg.scripts.predev, 'npm run build', 'npm run dev builds the client first');
+  assert.equal(pkg.scripts.dev, 'vite', 'npm run dev serves the client through Vite');
   assert.equal(pkg.scripts.prestart, 'npm run build', 'npm start builds the client first');
+  assert.match(pkg.scripts.build, /vite build/, 'the client is built by Vite');
   const signaling = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
   assert.match(signaling, /startHeartbeat\(intervalMs = 30000\)/, 'the heartbeat pings every 30s');
   assert.match(signaling, /socket\.terminate\(\)/, 'a socket that stopped answering is dropped');
+});
+
+test('joining a meeting is the initial state, and my own media is mine', () => {
+  const landing = /<section id="landing"[\s\S]*?<\/section>/.exec(HTML);
+  assert.ok(landing, 'there is a landing page');
+  const prejoin = /<div class="prejoin" id="prejoin-controls">([\s\S]*?)<\/div>/.exec(HTML);
+  assert.ok(prejoin, 'the landing page - the initial state - carries the way into the call');
+  for (const id of ['btn-toggle-mic', 'btn-toggle-cam', 'btn-join-call']) {
+    assert.ok(prejoin[1].includes(`id="${id}"`), `${id} is on the initial state`);
+  }
+  assert.ok(landing[0].includes('id="prejoin-controls"'), 'and the row is inside the landing card');
+  assert.match(CSS, /\.prejoin \{ display: flex;/, 'the row is styled');
+  assert.match(HTML, /<video id="prejoin-preview"[\s\S]{0,120}?hidden><\/video>/, 'with a preview of what the camera will publish');
+  assert.match(CSS, /\.prejoin-preview \{[\s\S]{0,260}?transform: scaleX\(-1\);/, 'which is mirrored, like my own tile');
+
+  // The row left the studio: it used to sit behind a host-only tab, where a viewer - the
+  // one person who needs it most - could never reach it.
+  const studio = /<div class="studio-panes layout hidden" id="studio-panes">([\s\S]*?)<\/div>\s*<\/main>/.exec(HTML);
+  assert.ok(studio, 'the studio exists');
+  assert.ok(!studio[1].includes('btn-join-call'), 'the studio no longer holds the way into the call');
+  assert.ok(!studio[1].includes('btn-toggle-mic'), 'nor the microphone toggle');
+
+  // The meeting bar's own microphone and camera are the same icons, where the words
+  // "Mute" and "Stop video" used to be, and nothing disables them.
+  assert.match(
+    HTML,
+    /<button type="button" id="btn-room-mic" class="room-tool icon-only" title="Mute or unmute your microphone"[\s\S]{0,220}?<svg class="icon"/,
+    "the bar's microphone is an icon",
+  );
+  assert.match(
+    HTML,
+    /<button type="button" id="btn-room-cam" class="room-tool icon-only" title="Start or stop your video"[\s\S]{0,220}?<svg class="icon"/,
+    'and so is the camera',
+  );
+  assert.ok(!/id="btn-room-mic"[^>]*disabled/.test(HTML), "the bar's microphone is never disabled");
+  assert.ok(!/id="btn-room-cam"[^>]*disabled/.test(HTML), 'and neither is the camera');
+  assert.match(CSS, /\.room-tool\.icon-only \{/, 'the icon buttons are styled for the bar');
+
+  const app = readClient('app');
+  assert.match(app, /function renderMyMediaButtons\(\)/, 'one painter keeps both sets of controls honest');
+  assert.match(app, /function myMicEnabled\(\)/, 'my microphone is read from my own tracks');
+  assert.match(app, /const mute = myMicEnabled\(\);/, 'so the toggle follows what it is really doing');
+  assert.match(app, /iconOnly\(barMic, micOn \? 'mic' : 'micOff'/, "the bar's icon carries the state");
+  assert.doesNotMatch(app, /mic\.disabled = !state\.inCall/, 'nothing gates my own media on having joined the call');
+  assert.match(app, /function myScreenSource\(\)/, 'and my screen share is known the same way');
+  assert.match(app, /preview\.hidden = !stream;/, 'the pre-join preview shows the camera only while it is on');
+
+  // Joining happens on the initial state: one press enters the room and then the call.
+  assert.match(app, /async function joinCallFromLanding\(\)/, 'the landing page joins the room and the call');
+  assert.match(app, /await submitJoinForm\(\);[\s\S]{0,80}?await joinCall\(\);/, 'in that order');
+  assert.match(app, /\$\('#btn-join-call'\)\.addEventListener\('click', joinCallFromLanding\);/, 'and the button is wired to it');
+  assert.match(app, /async function submitJoinForm\(\)/, 'the form has one reader');
+  assert.match(
+    app,
+    /\$\('#join-form'\)\.addEventListener\('submit', async \(event\) => \{\s*\n\s*event\.preventDefault\(\);\s*\n\s*await submitJoinForm\(\);/,
+    'which both ways in use',
+  );
+  assert.match(app, /\$\('#btn-join-call'\)\.disabled = Boolean\(state\.inCall\);/, 'Join call is usable before a room exists - it enters one');
+
+  // Media turned on before the room existed is handed over when the room arrives.
+  assert.match(app, /async function announceLocalMedia\(\)/, 'pre-join media is handed to the room');
+  assert.match(app, /await state\.camera\.announceSource\(source\.id\)/, 'by announcing it');
+  assert.match(app, /await announceLocalMedia\(\)\.catch\(\(\) => \{\}\);/, 'as part of joining');
+  assert.match(app, /const added = await state\.camera\.addCamera\(\{ announce: Boolean\(state\.roomId\) \}\)/, 'a pre-join camera is not announced to a room that does not exist');
+  const devices = readClient('devices');
+  assert.match(devices, /async announceSource\(sourceId\) \{/, 'the camera manager can announce a source later');
+});
+
+test('a screen share happens once: the second share replaces the first', () => {
+  const app = readClient('app');
+  const devices = readClient('devices');
+
+  // The library enforces it, so no caller can stack two screens up.
+  assert.match(devices, /await this\.endScreenShares\(\);/, 'a new share ends the old one first');
+  assert.match(devices, /async endScreenShares\(\) \{\s*\n\s*const sharing = this\.list\(\)\.filter\(\(source\) => source\.kind === 'screen'\);/, 'every screen of mine');
+  assert.match(devices, /for \(const source of sharing\) await this\.removeSource\(source\.id\)/, 'is stopped, not just forgotten');
+
+  // ...and the UI is a toggle, so the same press ends what it started.
+  assert.match(app, /const sharing = myScreenSource\(\);\s*\n\s*if \(sharing\) \{/, 'the picker ends the share it started');
+  assert.match(app, /await state\.camera\.removeSource\(sharing\.id\)/, 'by removing the source');
+  assert.match(app, /function renderScreenShareButton\(\)/, 'and says what the next press will do');
+  assert.match(app, /button\.textContent = sharing \? 'Stop sharing' : 'Share screen';/, 'stop or start');
+  assert.match(app, /renderScreenShareButton\(\);/, 'which is repainted with the picker');
+});
+
+
+
+test('the meeting bar sits with the program frame, and the rooms are visible', () => {
+  // The bar is inside the stage, immediately after the program view: the controls sit
+  // under the picture they control, in the stage's own column when the studio is docked
+  // beside the room, and they are a sibling of the views - so People keeps them.
+  const stage = /<section class="room-stage" id="room-stage">([\s\S]*?)<\/section>/.exec(HTML);
+  assert.ok(stage, 'there is a stage');
+  const body = stage[1];
+  assert.ok(body.includes('id="room-toolbar"'), 'the meeting bar is in the stage');
+  const programView = body.indexOf('stage-view program-view');
+  const bar = body.indexOf('<footer class="room-toolbar" id="room-toolbar">');
+  const peopleView = body.indexOf('stage-view people-view');
+  assert.ok(programView >= 0 && bar > programView, 'and it comes after the program frame');
+  assert.ok(peopleView > bar, 'as a sibling of the views, so the People view keeps it');
+  assert.match(CSS, /\.room-stage \{[\s\S]{0,220}?grid-template-rows: minmax\(0, 1fr\) auto;/, 'the stage keeps the last row for it');
+  assert.match(CSS, /\.room-stage > \.room-toolbar \{ grid-column: 1 \/ -1; \}/, 'and it spans the stage');
+  assert.match(CSS, /\.room \{[\s\S]{0,120}?grid-template-rows: auto minmax\(0, 1fr\);/, 'the room itself is the bar and the stage');
+
+  // Breakout rooms are visible from both places they are used from.
+  assert.match(HTML, /<button data-tab="rooms">Rooms<\/button>/, 'the studio has a Rooms tab');
+  const rooms = /<div class="tab-panel hidden" data-panel="rooms">([\s\S]*?)<\/div>\s*<\/div>/.exec(HTML);
+  assert.ok(rooms, 'which holds the breakout panel');
+  assert.ok(rooms[1].includes('id="breakout-list"'), 'with the list of rooms');
+  assert.ok(rooms[1].includes('id="btn-choose-breakout"'), 'and a way in for everyone');
+  assert.ok(!/data-panel="people"[\s\S]{0,900}?id="breakout-list"/.test(HTML), 'and it is no longer buried in the roster');
+
+  const app = readClient('app');
+  assert.match(app, /name === 'rooms'[\s\S]{0,140}?renderBreakouts\(\);/, 'the tab paints the rooms on the spot');
+  assert.match(app, /\$\('#btn-choose-breakout'\)\?\.addEventListener\('click', \(\) => openBreakoutPicker\(\)\);/, 'and the studio offers the same picker as the bar');
+});
+
+test('audio survives the paths that used to break it', () => {
+  const mixer = readClient('room-audio');
+  const relay = readClient('relay-audio');
+  const devices = readClient('devices');
+  const app = readClient('app');
+  const server = fs.readFileSync(path.join(rootDir, 'server', 'signaling.ts'), 'utf8');
+
+  // A voice that arrives *while* the room is ducked (the program mix is carrying it) has
+  // to come back up when the duck ends. The gain ramp only fires on a change, so the entry
+  // must start at exactly the value the mixer would ask for.
+  assert.match(mixer, /const wanted = monitor && !muted && !this\.ducked \? 1 : 0;/, 'a new voice starts at the gain the mixer would ask for');
+  assert.match(mixer, /gain\.gain\.value = wanted;/, 'which is what its gain is set to');
+  assert.match(mixer, /requested: wanted,/, 'and what it is recorded as wanting');
+  // The meters outlive the voices, so the sample timer must not stop with the last voice:
+  // the relayed voice would lose its meter and the mixer would stop reporting.
+  assert.match(mixer, /if \(!this\.entries\.size && !this\.meters\.size\) this\.stop\(\);/, 'the meters keep the mixer sampling');
+
+  // The PCM fallback says how deep it is, and the far end reads exactly that - reading
+  // 16-bit samples as 24-bit is noise, not a rounding error.
+  assert.match(relay, /const bits = header\.codec === 'pcm24' \|\| Number\(header\.bits\) === 24 \? 24 : 16;/, 'a slice that does not say is read as 16-bit');
+  assert.match(relay, /codec: bits === 24 \? 'pcm24' : 'pcm16',/, 'and a slice that is sent says what it is');
+  // 24-bit is three bytes a sample; when the socket is behind, the depth steps down so the
+  // voice still goes out instead of being dropped.
+  assert.match(relay, /_pcmBits\(\) \{[\s\S]{0,140}?return backlog > this\.maxBufferedBytes \/ 2 \? 16 : RELAY_PCM_BITS;/, 'the depth follows the socket');
+  assert.match(relay, /const bits = this\._pcmBits\(\);[\s\S]{0,80}?this\._toPcm\(mono, bits\)/, 'and the slice is encoded at that depth');
+
+  // Voice slices must not evict the warm *pictures* a newcomer is shown: a camera's
+  // microphone shares its source id.
+  assert.match(server, /if \(header\?\.kind === 'audio'\) return;/, 'only pictures are remembered for a newcomer');
+
+  // Media captured before a room exists must not be announced into nothing: the source is
+  // announced when the room arrives instead.
+  assert.match(devices, /async addMicrophone\(\{ deviceId = null, label = null, announce = true \}: any = \{\}\)/, 'a microphone can be captured without a room');
+  assert.match(app, /async function ensureMicrophone\(\{ announce = Boolean\(state\.roomId\) \}: any = \{\}\)/, 'which is how the pre-join microphone is opened');
 });

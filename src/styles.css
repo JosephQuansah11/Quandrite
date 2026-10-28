@@ -1,0 +1,227 @@
+/* ============================================================ Quandrite, React */
+/* One stylesheet, bundled by Vite. The tokens first, then the pieces the app is made
+   of - the buttons, the pills, the panels - and last the pages. */
+
+:root {
+  --bg: #070b16;
+  --panel: #111a2e;
+  --panel-2: #16203a;
+  --line: #22304f;
+  --text: #e8eefc;
+  --muted: #93a3c4;
+  --accent: #38bdf8;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --live: #f43f5e;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: radial-gradient(1200px 700px at 70% -10%, #122043 0%, var(--bg) 60%);
+  color: var(--text);
+  font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+.muted { color: var(--muted); }
+.empty { margin: 0; }
+h1, h2, h3 { margin: 0; font-weight: 650; }
+h2 { font-size: 15px; }
+h3 { font-size: 13px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
+
+/* ---------------------------------------------------------------- the button */
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 11px; border-radius: 9px; cursor: pointer;
+  font: inherit; font-size: 13px; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.btn:hover:not(:disabled) { border-color: #33456e; background: #1a2745; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.primary { background: #1d4ed8; border-color: #2563eb; }
+.btn.danger { background: #b91c1c; border-color: #dc2626; }
+.btn.ghost { background: transparent; border-color: transparent; }
+.btn.ghost:hover:not(:disabled) { background: rgba(255, 255, 255, .06); border-color: transparent; }
+.btn.active { box-shadow: inset 0 0 0 1px rgba(56, 189, 248, .5); }
+.btn.icon-only { padding: 7px; }
+.btn .icon { display: block; }
+.btn .badge {
+  min-width: 17px; padding: 0 5px; border-radius: 999px; font-size: 11px;
+  background: var(--accent); color: #04121f; font-weight: 700; text-align: center;
+}
+/* A tool in the meeting bar: round, labelled, and never wider than its word. */
+.btn.room-tool { border-radius: 999px; padding: 9px 14px; background: rgba(22, 32, 58, .85); }
+
+.toolbar { display: flex; align-items: center; gap: 8px; }
+.panel-actions, .dialog-actions { margin-left: auto; }
+
+/* ------------------------------------------------------------------ the pill */
+.pill {
+  padding: 4px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
+  letter-spacing: .04em; text-transform: lowercase;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
+}
+.pill.ok { color: #052e16; background: var(--ok); border-color: var(--ok); }
+.pill.warn { color: #451a03; background: var(--warn); border-color: var(--warn); }
+.pill.live { color: #fff; background: var(--live); border-color: var(--live); }
+.pill.rec { color: #fff; background: #dc2626; border-color: #dc2626; }
+.pill.accent { color: #04121f; background: var(--accent); border-color: var(--accent); }
+.pill-button { cursor: pointer; font-family: inherit; }
+
+/* --------------------------------------------------------------- the panel */
+.panel { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.panel-head { display: flex; align-items: center; gap: 10px; }
+.panel-hint { margin: 0; font-size: 12px; }
+.readout { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+.readout dt { color: var(--muted); }
+.readout dd { margin: 0; }
+
+/* ----------------------------------------------------------------- the form */
+.field { display: grid; gap: 5px; }
+.field-label { font-size: 12px; color: var(--muted); }
+.field input, .field select, .field textarea {
+  padding: 9px 11px; border-radius: 9px; font: inherit;
+  background: #0a1120; color: var(--text); border: 1px solid var(--line);
+}
+.field input:focus, .field select:focus, .field textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.field-hint { font-size: 11.5px; color: var(--muted); }
+.form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+/* ---------------------------------------------------------------- the dialog */
+.dialog {
+  width: min(560px, 94vw); padding: 14px 16px 16px; border-radius: 14px;
+  border: 1px solid var(--line); color: var(--text);
+  background: linear-gradient(180deg, rgba(14, 22, 42, .99), rgba(8, 13, 26, .99));
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .6);
+}
+.dialog::backdrop { background: rgba(2, 6, 14, .62); backdrop-filter: blur(2px); }
+.dialog-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.dialog-head .btn { margin-left: auto; }
+.dialog-body { max-height: 70vh; overflow: auto; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+/* ----------------------------------------------------------------- the toasts */
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: grid; gap: 8px; justify-items: end; }
+.toast {
+  display: flex; align-items: center; gap: 10px; max-width: 380px;
+  padding: 9px 12px; border-radius: 10px; font-size: 13px;
+  background: rgba(17, 26, 46, .97); border: 1px solid var(--line);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .5);
+}
+.toast.ok { border-color: var(--ok); }
+.toast.warn { border-color: var(--warn); }
+.toast.error { border-color: var(--danger); }
+
+/* ------------------------------------------------------------------ the tile */
+.room-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.tile {
+  position: relative; margin: 0; min-height: 150px; overflow: hidden;
+  border-radius: 12px; border: 1px solid var(--line); background: #0a1120;
+}
+.tile.speaking { border-color: var(--ok); box-shadow: 0 0 0 1px rgba(52, 211, 153, .35); }
+.tile.on-air { border-color: var(--live); }
+.tile-video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tile-fallback {
+  display: grid; place-items: center; height: 100%; min-height: 150px;
+  font-size: 30px; font-weight: 700; color: var(--muted); background: var(--panel-2);
+}
+.tile figcaption {
+  position: absolute; left: 8px; bottom: 8px; display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border-radius: 999px; font-size: 12px;
+  background: rgba(4, 9, 20, .78); border: 1px solid var(--line);
+}
+.role-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.role-dot.host { background: var(--accent); }
+.role-dot.cohost { background: #a78bfa; }
+.tile-on-air { color: var(--live); font-weight: 700; }
+.tile-tools {
+  position: absolute; right: 6px; top: 6px; gap: 4px;
+  opacity: 0; transition: opacity .12s ease;
+}
+.tile:hover .tile-tools, .tile:focus-within .tile-tools { opacity: 1; }
+
+/* ------------------------------------------------------------------- pages */
+.page { display: grid; gap: 18px; place-content: center; min-height: 100vh; padding: 24px; }
+.page-join { justify-items: center; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand h1 { font-size: 20px; }
+.brand-mark {
+  display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px;
+  font-weight: 800; color: #04121f; background: linear-gradient(160deg, var(--accent), #22d3ee);
+}
+.card {
+  display: grid; gap: 12px; width: min(460px, 92vw); padding: 18px;
+  border-radius: 14px; background: var(--panel); border: 1px solid var(--line);
+}
+
+/* -------------------------------------------------------------------- room */
+.room {
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 10px;
+  height: 100vh; padding: 0 12px 10px; min-height: 0;
+}
+.room-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 4px 0; }
+.room-heading { display: grid; line-height: 1.15; }
+.room-heading strong { font-size: 14px; }
+.room-heading small { font-size: 11.5px; }
+.room-bar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.segmented { display: flex; gap: 4px; padding: 3px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); }
+.segmented .btn { border-color: transparent; background: transparent; padding: 5px 10px; }
+.segmented .btn.primary { background: #1d4ed8; }
+
+.room-stage { position: relative; display: grid; min-height: 0; padding: 4px 0; }
+.room-stage .stage-view { min-height: 0; }
+.room-stage.view-people .program-view { display: none; }
+.room-stage.view-program .people-view { display: none; }
+.room-stage.view-split { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 10px; }
+.program-frame {
+  display: grid; place-items: center; width: 80%; height: 100%; margin: 0 auto;
+  border-radius: 12px; border: 1px dashed var(--line); background: #060b17;
+}
+.self-view {
+  position: absolute; right: 10px; bottom: 10px; width: 190px; overflow: hidden;
+  border-radius: 12px; border: 1px solid var(--line); background: #0a1120;
+}
+.self-view video { display: block; width: 100%; height: 110px; object-fit: cover; }
+.self-view-name { display: block; padding: 4px 8px; font-size: 11.5px; background: rgba(4, 9, 20, .8); }
+
+.room-toolbar { display: flex; justify-content: center; padding: 8px 0 0; }
+.room-toolbar-inner {
+  gap: 6px; padding: 6px; border-radius: 999px;
+  background: rgba(12, 19, 36, .92); border: 1px solid var(--line);
+}
+
+/* ------------------------------------------------------------------ studio */
+/* The studio is a column beside the stage. The room keeps its own column, so the
+   meeting is still on screen while the studio is open. */
+.room.studio-open { grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); }
+.room.studio-open > .room-bar,
+.room.studio-open > .room-toolbar { grid-column: 1 / -1; }
+.room.studio-open > .room-stage { grid-column: 1; }
+.studio-panes {
+  grid-column: 2; grid-row: 2; min-height: 0; overflow: auto;
+  display: grid; align-content: start; gap: 12px;
+  padding: 12px; border-radius: 14px; border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(12, 19, 36, .99), rgba(8, 13, 26, .99));
+}
+.studio-head { display: flex; align-items: center; gap: 8px; }
+.studio-head .btn { margin-left: auto; }
+.studio-tabs { width: 100%; }
+.studio-tabs .btn { flex: 1; justify-content: center; }
+.studio-meeting { display: flex; align-items: center; gap: 10px; }
+
+@media (max-width: 900px) {
+  /* No room beside the stage on a phone, so the studio docks under it and the stage
+     keeps the top half: still visible, never covered. */
+  .room.studio-open {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1.1fr) minmax(0, 1fr) auto;
+  }
+  .room.studio-open > .studio-panes { grid-column: 1; grid-row: 3; }
+  .room-stage.view-split { grid-template-columns: minmax(0, 1fr); }
+  .self-view { width: 130px; }
+}
+

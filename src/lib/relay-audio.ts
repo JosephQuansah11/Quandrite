@@ -3,7 +3,8 @@
  *
  * Pictures are the visible half of the fallback; this is the audible half. When
  * two networks will not let the browsers reach each other, the microphone is cut
- * into 32 ms slices of 16 kHz mono PCM, posted over the same WebSocket the studio
+ * into slices, encoded as **Opus at 48 kHz** where WebCodecs is there and sent as
+ * **48 kHz 24-bit PCM** where it is not, posted over the same WebSocket the studio
  * already uses, and played back on the other side through a small jitter buffer.
  *
  * The rule is the same as for the pictures: **keep the delay flat, never grow a
@@ -19,14 +20,18 @@ import {
   monotonicNs,
   nsToWire,
   relayLagNs,
-} from '/shared/protocol.js';
+} from '@shared/protocol';
 import {
   RELAY_CAPTURE_RATE,
   RELAY_MONO,
   RELAY_OPUS_MUSIC_BITRATE_BPS,
   RELAY_OPUS_VOICE_BITRATE_BPS,
+  RELAY_PCM_BITS,
+  RELAY_PCM_BYTES,
+  RELAY_PCM_MAX,
+  RELAY_PCM_RATE,
   RELAY_STEREO,
-} from '/shared/audio.js';
+} from '@shared/audio';
 
 /** 1024 samples at 48 kHz: a 21 ms slice, and what Opus is happiest with. */
 const AUDIO_FRAME_SAMPLES = 1024;
@@ -77,7 +82,7 @@ let decoded = 0;
 let decodeErrors = 0;
 let encodeErrors = 0;
 let encoded = 0;
-/** The codecs the sender ended up using: `opus`, `pcm16`, or both across sources. */
+/** The codecs the sender ended up using: `opus`, `pcm24`, or both across sources. */
 const sendCodecs = new Set<string>();
 
 /** The most recent hop breakdown (inbound / outbound / total), in nanoseconds. */
@@ -160,12 +165,30 @@ export function forgetRelayedAudio(peerId: string) {
 }
 
 /**
+ * Send relayed voice to a chosen speaker, where the browser can.
+ *
+ * The relay plays on a context of its own, so choosing an output device is two calls - one
+ * for the room mix (`RoomAudio.setOutputDevice`) and one for this. A browser without
+ * `setSinkId` follows the system, and this says so rather than pretending.
+ */
+export async function setRelayedAudioOutputDevice(deviceId: string) {
+  const ctx: any = relayAudioContext();
+  if (!ctx || typeof ctx.setSinkId !== 'function') return false;
+  try {
+    await ctx.setSinkId(deviceId || '');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Play one slice of relayed voice.
  *
- * Two codecs arrive here: **Opus** (48 kHz, what the sender prefers) and the older
- * **PCM 16** slice, which is kept as the fallback for a browser without WebCodecs. Both
- * end up in the same jitter-buffered scheduler, so a mixed room sounds the same either
- * way.
+ * Two codecs arrive here: **Opus** (48 kHz, what the sender prefers) and the **PCM** slice,
+ * which is 48 kHz 24-bit from a current client and 16 kHz 16-bit from an older one - the
+ * fallback for a browser without WebCodecs. Both end up in the same jitter-buffered
+ * scheduler, so a mixed room sounds the same either way.
  */
 export function playRelayedAudio(header: any, payload: Uint8Array | ArrayBuffer | null) {
   const from = header?.from;
@@ -191,15 +214,36 @@ export function playRelayedAudio(header: any, payload: Uint8Array | ArrayBuffer 
 
   if (header.codec === 'opus') return decodeRelayedOpus(from, header, bytes, ctx);
 
-  const count = Math.floor(bytes.byteLength / 2);
-  const rate = header.rate || RELAY_AUDIO_RATE;
+  // The PCM fallback. A slice says how it was encoded: **48 kHz 24-bit** from a current
+  // client, and 16 kHz 16-bit from an older one. Anything that does not say (an old
+  // sender, or a frame whose header predates the field) is read as 16-bit, because
+  // reading 16-bit samples as 24-bit is not a small error - it is noise.
+  const bits = header.codec === 'pcm24' || Number(header.bits) === 24 ? 24 : 16;
+  const width = bits / 8;
+  const count = Math.floor(bytes.byteLength / width);
+  if (!count) return false;
+  const rate = header.rate || (bits === 16 ? RELAY_AUDIO_RATE : RELAY_PCM_RATE);
   const buffer = ctx.createBuffer(1, count, rate);
   const channel = buffer.getChannelData(0);
   // Read through a DataView: the payload is a view into the frame buffer and is
   // not guaranteed to start on an even byte.
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  for (let i = 0; i < count; i += 1) channel[i] = view.getInt16(i * 2, true) / 32768;
+  for (let i = 0; i < count; i += 1) {
+    channel[i] = bits === 24 ? readPcm24(view, i * RELAY_PCM_BYTES) / RELAY_PCM_MAX : view.getInt16(i * 2, true) / 32768;
+  }
   return scheduleRelayedBuffer(from, buffer, ctx);
+}
+
+/**
+ * One 24-bit little-endian sample, sign-extended.
+ *
+ * A 24-bit sample has no typed-array counterpart, so it is read three bytes at a time and
+ * the sign bit of the top byte is carried down - which is what makes -1 full scale rather
+ * than a spike at the other end of the range.
+ */
+function readPcm24(view: DataView, at: number) {
+  const value = view.getUint8(at) | (view.getUint8(at + 1) << 8) | (view.getUint8(at + 2) << 16);
+  return value & 0x800000 ? value - 0x1000000 : value;
 }
 
 /**
@@ -315,7 +359,8 @@ export function relayedAudioStats() {
     stale: audioStale,
     senders: playing.size,
     // What the two ends are actually speaking: Opus at 48 kHz where WebCodecs is there,
-    // 16 kHz PCM where it is not. A room can have both at once.
+    // and 48 kHz PCM at 24-bit - or 16-bit when the socket is tight - where it is not.
+    // A room can have both at once.
     codecs: [...sendCodecs],
     encoded,
     decoded,
@@ -418,9 +463,9 @@ export class AudioRelay extends EventTarget {
     sink.connect(context.destination);
     entry.sink = sink;
 
-    // Opus at 48 kHz instead of 16 kHz PCM: a fraction of the bandwidth and none of the
-    // telephone sound. Where WebCodecs is missing (or refuses the config) the PCM slice
-    // below is still there, so the room keeps working.
+    // Opus at 48 kHz rather than the PCM fallback: a fraction of the bandwidth and none of
+    // the telephone sound. Where WebCodecs is missing (or refuses the config) the 48 kHz
+    // 24-bit slice below is still there, so the room keeps working.
     entry.encoder = this._makeEncoder(entry);
 
     this.sources.set(id, entry);
@@ -562,15 +607,21 @@ export class AudioRelay extends EventTarget {
       return;
     }
 
-    // No WebCodecs: the PCM fallback, exactly as it always was.
+    // No WebCodecs: the PCM fallback, at 48 kHz. Its depth follows the socket - 24-bit
+    // while there is room for it, 16-bit when there is not, because a voice that arrives
+    // at 16 bits is worth more than one at 24 that never arrives. The header says which,
+    // and the far end reads it back the same way.
     if (!this._ready(entry)) return;
-    const pcm = this._toPcm16(mono);
+    const bits = this._pcmBits();
+    const pcm = this._toPcm(mono, bits);
     let peak = 0;
-    for (let i = 0; i < pcm.length; i += 1) {
-      const level = Math.abs(pcm[i]);
+    for (let i = 0; i < mono.length; i += 1) {
+      const level = Math.abs(mono[i]);
       if (level > peak) peak = level;
     }
-    const quiet = peak < AUDIO_SILENCE_PEAK * 32768;
+    // Silence is not worth its bytes. The peak is on a 0..1 scale, whatever the sample
+    // width, so the threshold means the same thing here and with Opus.
+    const quiet = peak < AUDIO_SILENCE_PEAK;
     const now = Date.now();
     if (quiet && now < this.silentUntil) return;
     this.silentUntil = quiet ? now + AUDIO_SILENCE_KEEPALIVE_MS : 0;
@@ -579,9 +630,12 @@ export class AudioRelay extends EventTarget {
       {
         sourceId: id,
         kind: 'audio',
-        codec: 'pcm16',
+        codec: bits === 24 ? 'pcm24' : 'pcm16',
+        bits,
         label: entry.label,
-        rate: this.context?.sampleRate || RELAY_AUDIO_RATE,
+        rate: RELAY_PCM_RATE,
+        // One channel: the fallback carries the voice, which is mono whatever the source.
+        channels: RELAY_MONO,
         // Nanoseconds on the shared clock: a voice slice lives for 20 ms, so
         // milliseconds are simply not fine enough to say where it is.
         tns: nsToWire(this.socket.serverNowNs?.() ?? monotonicNs()),
@@ -591,19 +645,41 @@ export class AudioRelay extends EventTarget {
     );
     if (sent) {
       this.sent += 1;
-      sendCodecs.add('pcm16');
-      this._emit('level', { id, level: peak / 32768 });
+      sendCodecs.add(bits === 24 ? 'pcm24' : 'pcm16');
+      this._emit('level', { id, level: peak });
     } else {
       this.dropped += 1;
     }
   }
 
-  /** Float samples to 16-bit PCM, at the rate the wire expects. */
-  _toPcm16(input: Float32Array) {
-    const rate = this.context?.sampleRate || RELAY_AUDIO_RATE;
-    const step = rate > RELAY_AUDIO_RATE ? rate / RELAY_AUDIO_RATE : 1;
+  /**
+   * How deep the PCM fallback can afford to be right now.
+   *
+   * 24-bit is the standard the voice path runs at (see `shared/audio.ts`), but it is three
+   * bytes a sample - 144 KB/s at 48 kHz - and the relay is a fallback path with a small
+   * socket budget. When the socket is already half full, the depth steps down rather than
+   * dropping the slice: the room keeps hearing the voice, and the header says which depth
+   * this slice is so the far end decodes it correctly.
+   */
+  _pcmBits() {
+    const backlog = this.socket?.socket?.bufferedAmount ?? 0;
+    return backlog > this.maxBufferedBytes / 2 ? 16 : RELAY_PCM_BITS;
+  }
+
+  /**
+   * Float samples to PCM, little-endian, at the rate the wire expects - 24-bit by
+   * default, 16-bit when the socket cannot carry the depth.
+   *
+   * A browser can mix above 48 kHz (96 kHz on some audio hardware); when it does, the
+   * samples that are skipped are averaged rather than dropped, so a voice does not alias -
+   * and 24 bits keep the quiet end of it above the quantisation noise.
+   */
+  _toPcm(input: Float32Array, bits = RELAY_PCM_BITS) {
+    const rate = this.context?.sampleRate || RELAY_PCM_RATE;
+    const step = rate > RELAY_PCM_RATE ? rate / RELAY_PCM_RATE : 1;
     const count = step > 1 ? Math.floor(input.length / step) : input.length;
-    const pcm = new Int16Array(count);
+    const width = bits / 8;
+    const pcm = new Uint8Array(count * width);
     for (let i = 0; i < count; i += 1) {
       let sample;
       if (step > 1) {
@@ -617,7 +693,20 @@ export class AudioRelay extends EventTarget {
         sample = input[i];
       }
       const clamped = Math.max(-1, Math.min(1, sample));
-      pcm[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+      const at = i * width;
+      if (width === RELAY_PCM_BYTES) {
+        // Two's complement, little-endian: -1 is 0x800000 and 1 is 0x7fffff, so full
+        // scale lands exactly where the receiving end divides it back from.
+        const value =
+          Math.round(clamped < 0 ? clamped * (RELAY_PCM_MAX + 1) : clamped * RELAY_PCM_MAX) & 0xffffff;
+        pcm[at] = value & 0xff;
+        pcm[at + 1] = (value >> 8) & 0xff;
+        pcm[at + 2] = (value >> 16) & 0xff;
+      } else {
+        const value = Math.round(clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff);
+        pcm[at] = value & 0xff;
+        pcm[at + 1] = (value >> 8) & 0xff;
+      }
     }
     return pcm;
   }

@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { RoomAudio } from '../public/js/room-audio.ts';
+import { RoomAudio } from '../src/lib/room-audio.ts';
 
 /** One level per 50 ms pass, straight off a live broad howl as it climbed. */
 const CLIMB = [0.0127, 0.0463, 0.0681, 0.1024, 0.1368, 0.1547, 0.1678];

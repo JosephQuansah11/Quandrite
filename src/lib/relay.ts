@@ -15,8 +15,8 @@
  * in `shared/protocol.ts`.
  */
 
-import { monotonicNs, nsToWire } from '/shared/protocol.js';
-import { QualityLadder, RELAY_LADDER, ladderIndexForNetwork } from './quality.js';
+import { monotonicNs, nsToWire } from '@shared/protocol';
+import { QualityLadder, RELAY_LADDER, ladderIndexForNetwork } from './quality';
 
 export class MediaRelay extends EventTarget {
 

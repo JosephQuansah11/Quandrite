@@ -7,8 +7,8 @@
  * the compositor + relay path.
  */
 
-import { CLIENT } from '/shared/protocol.js';
-import { MUSIC_BITRATE_BPS, VOICE_BITRATE_BPS, opusParameters, preferOpus } from '/shared/audio.js';
+import { CLIENT } from '@shared/protocol';
+import { MUSIC_BITRATE_BPS, VOICE_BITRATE_BPS, opusParameters, preferOpus } from '@shared/audio';
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },

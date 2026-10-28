@@ -95,6 +95,8 @@ interface ClientState {
   panes: Record<string, boolean>;
   /** How the room is shown: slide, grid or list (null = pick by room size). */
   peopleView: string | null;
+  /** My own settings: devices, how I join, and the broadcast defaults. */
+  settings: Record<string, any>;
   sceneForm: { type: string; screenKey?: string; music?: any };
   inCall: boolean;
   publishing: boolean;
@@ -158,6 +160,7 @@ const state: ClientState = {
   roomPeers: null,
   panes: loadPanes(),
   peopleView: loadPeopleView(),
+  settings: loadSettings(),
   sceneForm: { type: 'title' },
   inCall: false,
   publishing: false,
@@ -183,13 +186,63 @@ function wsUrl() {
  * preview immediately instead of after a re-join.
  */
 const PANE_KEY = 'quandrite.panes';
-const PANES = ['program', 'grid', 'participants', 'sources', 'sidebar'];
+const PANES = ['program', 'grid', 'sources', 'sidebar'];
 /** How the room is shown, and the size above which a list is the only sane view. */
 const PEOPLE_VIEW_KEY = 'quandrite.peopleView';
 const PEOPLE_VIEWS = ['slide', 'grid', 'list'];
 const PEOPLE_LIST_LIMIT = 50;
 /** Where we remember that the host chose to set the room password later. */
 const PASSWORD_PROMPT_KEY = 'quandrite.passwordPrompt';
+/**
+ * My own settings, in one place.
+ *
+ * Everything on the settings screen is mine and lives in this browser: which devices to
+ * use, how joining behaves, how the room is shown to me, the broadcast defaults, and what
+ * this client is doing. Nothing here is sent to the room or changes what anybody else
+ * sees - the name and the role are only the *defaults* the join form starts on.
+ *
+ * The preferences that already had a key of their own (the panes, the people view, the
+ * stage view, the mirror, the bell) keep it, and this screen reads and writes them through
+ * the same functions the rest of the app uses, so there is one answer to each question.
+ */
+const SETTINGS_KEY = 'quandrite.settings';
+
+const DEFAULT_SETTINGS = {
+  /** What the join form starts with. */
+  name: '',
+  role: 'viewer',
+  /** Which device to capture with, by id. Empty means "whatever the browser picks". */
+  micId: '',
+  cameraId: '',
+  speakerId: '',
+  /** What pressing "Join call" does. The landing page's toggles override it for one join. */
+  joinWithMic: true,
+  joinWithVideo: false,
+  /** What the Go live tab starts on, for a host. */
+  preset: '',
+  record: true,
+};
+
+function loadSettings() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    return { ...DEFAULT_SETTINGS, ...(stored && typeof stored === 'object' ? stored : {}) };
+  } catch {
+    // a corrupt preference just means the defaults
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+/** Remember one or more preferences, and hand the whole set back. */
+function saveSettings(patch = {}) {
+  state.settings = { ...state.settings, ...patch };
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+  } catch {
+    // private mode: the choice simply does not persist
+  }
+  return state.settings;
+}
 /** The one-second repaint that keeps a running countdown counting. */
 let sceneWatchTimer: any = null;
 let sceneTicker: any = null;
@@ -197,7 +250,7 @@ let sceneTicker: any = null;
 let passwordPageHandled = false;
 
 function loadPanes() {
-  const panes = { program: true, grid: true, participants: true, sources: true, sidebar: true };
+  const panes = { program: true, grid: true, sources: true, sidebar: true };
   try {
     const stored = JSON.parse(localStorage.getItem(PANE_KEY) || '{}');
     for (const pane of PANES) if (typeof stored[pane] === 'boolean') panes[pane] = stored[pane];
@@ -286,7 +339,6 @@ function myCameraSource() {
   return state.camera.list().find((source) => source.kind === 'camera') || null;
 }
 
-/** Enable or disable the microphone on every local source at once. */
 /**
  * Mute or unmute **the microphone**, and only the microphone.
  *
@@ -302,6 +354,70 @@ function microphoneTracks() {
     tracks.push(...(source.stream?.getAudioTracks?.() || []));
   }
   return tracks;
+}
+
+/**
+ * Is my microphone actually live?
+ *
+ * It is asked of the local tracks rather than of the room's record, so the same answer
+ * holds before a room is joined - which is where the pre-join toggles are used - and the
+ * room's record still wins when the host has muted me.
+ */
+function myMicEnabled() {
+  const me = state.members.find((member) => member.id === state.clientId);
+  if (me?.muted) return false;
+  return microphoneTracks().some((track) => track.enabled !== false);
+}
+
+/** The screen I am sharing, if any. There is never more than one. */
+function myScreenSource() {
+  return state.camera.list().find((source) => source.kind === 'screen') || null;
+}
+
+/**
+ * Paint my own two controls: the landing page's pre-join toggles and the meeting bar's
+ * buttons, from what my microphone and camera are really doing.
+ *
+ * They are the same two actions in both places, so they are painted from one state and
+ * carry the same icons - a struck-through microphone means muted, and the words that say
+ * what the press will do live in the tooltip.
+ */
+function renderMyMediaButtons() {
+  const micOn = myMicEnabled();
+  const cameraOn = Boolean(myCameraSource());
+  const micLabel = micOn ? 'Mute' : 'Unmute';
+  const camLabel = cameraOn ? 'Stop' : 'Start';
+
+  iconOnly($('#btn-toggle-mic'), micOn ? 'mic' : 'micOff', `${micLabel} your microphone`);
+  iconOnly($('#btn-toggle-cam'), cameraOn ? 'camera' : 'cameraOff', `${camLabel} your video`);
+
+  const barMic = $('#btn-room-mic');
+  if (barMic) {
+    iconOnly(barMic, micOn ? 'mic' : 'micOff', `${micLabel} your microphone`);
+    barMic.classList.toggle('on', micOn);
+    barMic.setAttribute('aria-pressed', String(micOn));
+  }
+  const barCam = $('#btn-room-cam');
+  if (barCam) {
+    iconOnly(barCam, cameraOn ? 'camera' : 'cameraOff', `${camLabel} your video`);
+    barCam.classList.toggle('on', cameraOn);
+    barCam.setAttribute('aria-pressed', String(cameraOn));
+  }
+  const share = $('#btn-room-share');
+  if (share) share.classList.toggle('on', Boolean(myScreenSource()));
+  // The picker's screen button says what pressing it will do - including when a share
+  // ended from the browser's own "stop sharing" bar rather than from here.
+  renderScreenShareButton();
+
+  // The landing page's preview shows what the camera will publish, and nothing at all
+  // when it is off - so "the camera is on" is something I can see, not just be told.
+  const preview = $('#prejoin-preview');
+  if (preview) {
+    const stream = myCameraSource()?.stream || null;
+    if (preview.srcObject !== stream) preview.srcObject = stream;
+    preview.hidden = !stream;
+    if (stream) preview.play?.().catch(() => {});
+  }
 }
 
 function setLocalAudio(enabled) {
@@ -326,13 +442,7 @@ function setLocalAudio(enabled) {
   } else {
     state.speaking?.forget(state.clientId);
   }
-  const button = $('#btn-toggle-mic');
-  if (button) iconOnly(button, enabled ? 'mic' : 'micOff', enabled ? 'Mute' : 'Unmute');
-  const camera = $('#btn-toggle-cam');
-  if (camera) {
-    const on = Boolean(myCameraSource());
-    iconOnly(camera, on ? 'camera' : 'cameraOff', on ? 'Stop video' : 'Start video');
-  }
+  renderMyMediaButtons();
 }
 
 /** True while I am standing in a breakout room. */
@@ -470,11 +580,17 @@ function localMediaStream() {
   return sources.find((entry) => entry.stream?.getAudioTracks?.().length)?.stream || null;
 }
 
-/** The microphone I publish, added on demand the first time I speak. */
-async function ensureMicrophone() {
+/**
+ * The microphone I publish, added on demand the first time I speak.
+ *
+ * A source can only be announced inside a room, so the announcement follows the room: a
+ * microphone captured on the landing page's pre-join row is announced the moment I am in.
+ */
+async function ensureMicrophone({ announce = Boolean(state.roomId) }: any = {}) {
   const existing = state.camera.list().find((entry) => entry.stream?.getAudioTracks?.().length);
   if (existing) return existing;
-  return state.camera.addMicrophone({});
+  // The microphone I chose in my settings, or whatever the browser picks.
+  return state.camera.addMicrophone({ announce, deviceId: state.settings.micId || null });
 }
 
 /**
@@ -490,7 +606,10 @@ async function ensureStandaloneMicrophone() {
     .list()
     .find((entry) => entry.kind === 'audio' && entry.stream?.getAudioTracks?.().length);
   if (standalone) return standalone;
-  return state.camera.addMicrophone({});
+  return state.camera.addMicrophone({
+    announce: Boolean(state.roomId),
+    deviceId: state.settings.micId || null,
+  });
 }
 
 /**
@@ -559,9 +678,10 @@ function relayFallbackNeeded() {
  * Start, refresh or stop the socket relay to match what I publish and whether the
  * peer connections are actually carrying it.
  *
- * Cameras and screens go out as pictures; microphones go out as 16 kHz voice. Both
- * ride the same socket and both stop the moment peer-to-peer is working, because a
- * direct connection is always better.
+ * Cameras and screens go out as pictures; microphones go out as 48 kHz voice - Opus where
+ * WebCodecs is there, and 48 kHz 24-bit PCM where it is not. Both ride the same socket and
+ * both stop the moment peer-to-peer is working, because a direct connection is always
+ * better.
  */
 function syncRelay() {
   if (!state.relay) return;
@@ -704,7 +824,7 @@ async function renderRelayedFrame(header, payload): Promise<void> {
 
 /** Put a relayed picture on a peer's tile without rebuilding the whole room. */
 function showRelayedPicture(peerId, url, lag: any = null) {
-  const tile = document.querySelector(`#participant-strip [data-peer="${peerId}"]`);
+  const tile = document.querySelector(`#remote-grid [data-peer="${peerId}"]`);
   if (!tile) {
     renderParticipants();
     return;
@@ -717,26 +837,12 @@ function showRelayedPicture(peerId, url, lag: any = null) {
   }
   picture.src = url;
   tile.classList.add('live');
-  // The whole lag, in whatever unit reads best - microseconds while a hop is
-  // healthy, milliseconds once it is not.
-  setTransport(tile, `relay ${formatLagNs(lag?.totalNs)}`, 'relay');
+  // The whole lag, in whatever unit reads best - microseconds while a hop is healthy,
+  // milliseconds once it is not. It goes on the tile's tooltip: the room's tiles carry
+  // the picture, and the numbers are for when something looks wrong.
   tile.title = lag?.inboundNs != null
-    ? `to server ${formatLagNs(lag.inboundNs)} \u00b7 from server ${formatLagNs(lag.outboundNs)}`
-    : '';
-}
-
-/**
- * Say which path a peer's picture is on.
- *
- * `P2P` is the WebRTC connection (fastest); `relay ~N ms` is the socket fallback
- * and how far behind the picture is - the number to watch when the network is
- * struggling.
- */
-function setTransport(tile, text, kind = '') {
-  const node = tile?.querySelector('.transport');
-  if (!node) return;
-  node.textContent = text || '';
-  node.className = `transport ${kind}`.trim();
+    ? `relayed \u00b7 to server ${formatLagNs(lag.inboundNs)} \u00b7 from server ${formatLagNs(lag.outboundNs)}`
+    : 'relayed';
 }
 
 /**
@@ -749,6 +855,26 @@ async function publishToRoom(stream) {
   if (!state.meeting.active) return false;
   state.meeting.setCameraEnabled(true);
   for (const track of stream.getTracks?.() || []) state.meeting.attachTrack(track, stream);
+  return true;
+}
+
+/**
+ * Hand the room the media I published before I was in it.
+ *
+ * The pre-join toggles capture locally, so a camera or a microphone can exist with no room
+ * to announce it in - the server only accepts a source from a member. Joining is the
+ * moment that changes, so what is already running is announced here and pushed to every
+ * peer: pressing "Join call" does not repeat what the toggles already did.
+ */
+async function announceLocalMedia() {
+  if (!state.roomId) return false;
+  for (const source of state.camera.list()) {
+    if (source.kind === 'virtual' || source.meta?.remote) continue;
+    await state.camera.announceSource(source.id).catch(() => {});
+  }
+  const stream = localMediaStream();
+  if (stream) await publishToRoom(stream).catch(() => {});
+  syncRelay();
   return true;
 }
 
@@ -914,173 +1040,17 @@ function askToBeShown(mode) {
   send(CLIENT.SOURCE_UPDATE, { sourceId: source.id, patch: { request: mode } });
 }
 
-function withdrawRequest() {
-  const source = myOwnSource();
-  if (!source?.request) return;
-  send(CLIENT.SOURCE_UPDATE, { sourceId: source.id, patch: { request: null } });
-}
-
-/**
- * The controls on my own tile in the room strip: microphone, camera and - for
- * viewers and visitors - the buttons that ask the host to show them.
- *
- * Built once and updated in place, so the video never flickers.
- */
-function myTileActions() {
-  return el('div', { class: 'tile-actions' }, [
-    el('button', { class: 'tiny', dataset: { tile: 'mic' }, onclick: () => toggleMyMedia('mic') }),
-    el('button', { class: 'tiny ghost', dataset: { tile: 'camera' }, onclick: () => toggleMyMedia('camera') }),
-    el('button', { class: 'tiny ghost', dataset: { tile: 'grid' }, onclick: () => askToBeShown('grid') }),
-    el('button', { class: 'tiny ghost', dataset: { tile: 'air' }, onclick: () => askToBeShown('air') }),
-    el('button', { class: 'tiny ghost', dataset: { tile: 'withdraw' }, onclick: withdrawRequest }),
-  ]);
-}
-
-/** Keep those buttons honest: labels, state and what is worth showing. */
-function updateMyTileActions(tile, member) {
-  const mic = tile.querySelector('[data-tile="mic"]');
-  if (!mic) return;
-  iconLabel(mic, member.muted ? 'micOff' : 'mic', member.muted ? 'Unmute' : 'Mute');
-  mic.title = member.muted ? 'Turn your microphone on' : 'Mute your microphone';
-  mic.classList.toggle('ghost', member.muted);
-
-  const camera = tile.querySelector('[data-tile="camera"]');
-  iconLabel(camera, member.cameraEnabled ? 'camera' : 'cameraOff', member.cameraEnabled ? 'Stop video' : 'Start video');
-  camera.title = member.cameraEnabled ? 'Stop publishing your camera' : 'Publish your camera';
-  camera.classList.toggle('ghost', !member.cameraEnabled);
-
-  const source = myOwnSource();
-  const withdraw = tile.querySelector('[data-tile="withdraw"]');
-  // The host and co-hosts place sources directly, so asking is for the rest.
-  const canAsk = !hasControl() && Boolean(source) && !source.request;
-  for (const mode of ['grid', 'air']) {
-    const button = tile.querySelector(`[data-tile="${mode}"]`);
-    button.classList.toggle('hidden', !canAsk);
-    button.textContent = mode === 'grid' ? 'ask for grid' : 'ask for air';
-  }
-  withdraw.classList.toggle('hidden', !source?.request);
-  if (source?.request) withdraw.textContent = `asked for ${source.request} \u2715`;
-}
-
 function renderParticipants() {
-  // The room grid is the main view, and the strip is its side pane: both come from
-  // the same roster, so both are painted together.
+  // The room grid is the room's own view of who is here, and the switcher in the room
+  // bar says how to show them, so the two are painted together. The strip that used to
+  // live in the studio pane is gone: the studio is for the broadcast, and the people are
+  // the room - the same view, however it is laid out.
   renderRoomGrid();
   updateRoomToolbar();
   // Who I can message privately follows the roster.
   renderChatTargets();
-  // My own camera is the small picture in the corner, so the room's own view is
-  // everybody else: one tile each, all the same size.
-  const members = roomMembers().filter((member) => member.id !== state.clientId);
-  const strip = $('#participant-strip');
-  if (!strip) return;
-
-  // How the room is shown: a slide, a grid, or - in a big room - a list that
-  // still carries everyone's controls.
-  const view = peopleViewFor(members.length);
-  strip.className = `participant-strip ${view}`;
-  for (const button of $$('#people-view button')) {
-    button.classList.toggle('active', button.dataset.view === view);
-  }
-
-  const label = $('#participant-room-label');
-  if (label) label.textContent = state.breakoutId ? breakoutLabel(state.breakoutId) : 'main room';
-  const count = $('#participant-count');
-  if (count) {
-    const elsewhere = state.members.length - members.length;
-    count.textContent = [`${members.length} here`, elsewhere > 0 ? `${elsewhere} elsewhere` : null]
-      .filter(Boolean)
-      .join(' \u00b7 ');
-  }
-
-  const seen = new Set();
-  for (const member of members) {
-    seen.add(member.id);
-    const isMe = member.id === state.clientId;
-    // My own video comes from my camera, everyone else's from the room mesh. A
-    // camera that has been switched off shows the avatar again, even though the
-    // peer connection is still up.
-    const stream = member.cameraEnabled
-      ? state.peerStreams.get(member.id) || (isMe ? state.camera.primaryStream() : null)
-      : null;
-
-    let tile = strip.querySelector(`[data-peer="${member.id}"]`);
-    if (!tile) {
-      const children = [
-        el('div', { class: 'avatar' }),
-        el('div', { class: 'name' }),
-        el('div', { class: 'sub' }),
-        // Which path the picture is on: P2P, or the socket relay and its delay.
-        el('div', { class: 'transport' }),
-        // A wave under the tile shows who is talking.
-        el('div', { class: 'wave' }, waveBars()),
-      ];
-      // Everyone controls their own media right where they see themselves.
-      if (isMe) children.push(myTileActions());
-      tile = el('div', { class: 'participant-tile', dataset: { peer: member.id } }, children);
-      strip.append(tile);
-    }
-
-    const video = tile.querySelector('video');
-    if (stream && !video) {
-      const node = el('video', { autoplay: true, playsInline: true, muted: true });
-      node.srcObject = stream;
-      tile.prepend(node);
-      tile.classList.add('live');
-    } else if (stream && video && video.srcObject !== stream) {
-      video.srcObject = stream;
-    } else if (!stream && video) {
-      video.remove();
-      tile.classList.remove('live');
-    }
-
-    // No live feed? A relayed picture (the socket fallback) stands in for it, so
-    // a camera or screen still shows up when the networks refuse peer-to-peer.
-    const frame = state.relayFrames.get(member.id);
-    // A relayed picture is proof they are publishing, even before the member's
-    // own "camera on" reaches us.
-    const picture = !stream && (member.cameraEnabled || frame) ? frame?.url || null : null;
-    let image = tile.querySelector('img.tile-picture');
-    if (picture && !image) {
-      image = el('img', { class: 'tile-picture', alt: '' });
-      tile.prepend(image);
-      tile.classList.add('live');
-    }
-    if (image) {
-      if (picture) image.src = picture;
-      else {
-        image.remove();
-        tile.classList.toggle('live', Boolean(stream));
-      }
-    }
-
-    tile.querySelector('.avatar').textContent = initials(member.name);
-    const name = tile.querySelector('.name');
-    // The dot carries the role; the word is only in the top bar.
-    name.textContent = '';
-    name.append(roleDot(member.role), `${member.name}${isMe ? ' (you)' : ''}`);
-    tile.querySelector('.sub').textContent = [
-      member.muted ? 'muted' : 'mic on',
-      member.cameraEnabled ? 'camera on' : 'camera off',
-    ].join(' \u00b7 ');
-    // Say which path the picture is on: the live connection, or the relay (whose
-    // delay is refreshed with every frame).
-    if (stream) setTransport(tile, 'P2P', 'p2p');
-    else if (!picture) setTransport(tile, '');
-    if (isMe) updateMyTileActions(tile, member);
-  }
-
-  for (const tile of [...strip.querySelectorAll('.participant-tile')]) {
-    if (!seen.has(tile.dataset.peer)) tile.remove();
-  }
-
-  const empty = strip.querySelector('.participant-empty');
-  if (!members.length && !empty) {
-    strip.append(el('p', { class: 'participant-empty muted', text: 'No one is in this room yet.' }));
-  } else if (members.length && empty) {
-    empty.remove();
-  }
 }
+
 
 // ------------------------------------------------------------------ bootstrap
 
@@ -1244,9 +1214,10 @@ function boot() {
             fromServer: formatLagNs(relayHopsNs().outboundNs),
           }
         : null,
-      paths: [...document.querySelectorAll('#participant-strip .participant-tile')].map((tile: any) => ({
+      paths: [...document.querySelectorAll('#remote-grid .room-tile')].map((tile: any) => ({
         peer: tile.dataset.peer,
-        path: tile.querySelector('.transport')?.textContent || '',
+        // Which path their picture is on: the live connection, the relay, or nothing.
+        path: tile.querySelector('video') ? 'video' : tile.querySelector('img.tile-picture') ? 'relay' : 'none',
       })),
     }),
   };
@@ -1600,6 +1571,9 @@ async function joinRoom({ name, roomId, role, password, silent = false }) {
   // The room mesh and the program feed follow the room, not a button press.
   await ensureMesh().catch(() => {});
   syncProgramFeed();
+  // Anything I turned on before the room existed - the pre-join camera and microphone -
+  // belongs to it now, so it is announced and published from here.
+  await announceLocalMedia().catch(() => {});
   if (!silent) toast(`Joined ${result.roomId} as ${result.role}`, 'ok');
   // A brand new room has no password: the host gets the password page, once, on
   // the way in. A silent re-join (a reconnect) never interrupts with it.
@@ -1628,6 +1602,34 @@ async function joinRoom({ name, roomId, role, password, silent = false }) {
 }
 
 /**
+ * Read the join form and enter the room.
+ *
+ * The password page (if this room needs one) comes up on its own after the join, between
+ * the form and the studio. Both ways in - the form's own button and the landing page's
+ * "Join call" - go through here, so there is one answer to what the fields mean.
+ *
+ * @returns {Promise<boolean>} whether the room was entered.
+ */
+async function submitJoinForm() {
+  const name = $('#join-name').value.trim();
+  const roomId = $('#join-room').value.trim().toLowerCase();
+  const role = $('#join-role').value;
+  const password = $('#join-password').value;
+  if (!name || !roomId) {
+    toast('Your name and a room code are needed to join', 'warn');
+    return false;
+  }
+  try {
+    await joinRoom({ name, roomId, role, password });
+    history.replaceState(null, '', `/?room=${encodeURIComponent(roomId)}&name=${encodeURIComponent(name)}`);
+    return true;
+  } catch (error) {
+    toast(error.message, 'error');
+    return false;
+  }
+}
+
+/**
  * Three screens, one at a time: the landing page before a room, the password page
  * while a brand new host protects the seat, and the studio itself.
  */
@@ -1636,17 +1638,22 @@ function updateJoinControls() {
   const needsPassword = inRoom && !passwordPageHandled && roomNeedsHostPassword() && !passwordPromptedLater();
   const landing = $('#landing');
   if (landing) landing.classList.toggle('hidden', inRoom);
+  // My settings are one of the screens: they stand in front of the landing page and the
+  // room while they are open, and give them back when they close.
+  const settings = $('#settings-page');
+  if (settings) settings.classList.toggle('hidden', !settingsOpen);
+  if (settingsOpen) landing?.classList.add('hidden');
   const passwordPage = $('#password-page');
   if (passwordPage) passwordPage.classList.toggle('hidden', !needsPassword);
   const studio = $('#studio');
   // The room is the view; the studio panes are a drawer over it.
-  setRoomOpen(inRoom && !needsPassword);
+  setRoomOpen(inRoom && !needsPassword && !settingsOpen);
   // Sharing is a room action: anyone in the room can publish their camera or
   // screen, and the host can place what arrives.
   const share = $('#btn-share');
   if (share) share.classList.toggle('hidden', !inRoom || needsPassword);
   const join = $('#btn-join');
-  if (join) join.textContent = inRoom ? 'Rejoin' : 'Join';
+  if (join) join.textContent = inRoom ? 'Rejoin the room' : 'Join the room';
   renderIdentity();
 }
 
@@ -1831,6 +1838,13 @@ function renderRoomGrid() {
   // My own picture is the small one in the corner: the room is everybody *else*, so
   // the tiles stay a grid of participants rather than one of them being me twice.
   const members = roomMembers().filter((member) => member.id !== state.clientId);
+  // Slide, grid or list - the same three choices as before, now applied here. The
+  // switcher in the room bar is what sets them, so it is kept in step with the view.
+  const view = peopleViewFor(members.length);
+  grid.className = `room-grid ${view}`;
+  for (const button of $$('#people-view button')) {
+    button.classList.toggle('active', button.dataset.view === view);
+  }
   const seen = new Set();
 
   for (const member of members) {
@@ -2238,29 +2252,11 @@ function roleLabel(role) {
  * to each question rather than two that can disagree.
  */
 function updateRoomToolbar() {
-  const me = state.members.find((member) => member.id === state.clientId);
-  const muted = Boolean(me?.muted);
-  const camera = Boolean(myCameraSource());
-  const sharing = state.camera.list().some((source) => source.kind === 'screen');
+  // My own microphone and camera are painted from what they are actually doing, and they
+  // are mine to use whether or not I have pressed "Join call": the icon carries the state,
+  // and the tooltip says what the next press will do.
+  renderMyMediaButtons();
 
-  const mic = $('#btn-room-mic');
-  if (mic) {
-    mic.disabled = !state.inCall;
-    mic.classList.toggle('on', !muted && state.inCall);
-    mic.setAttribute('aria-pressed', String(!muted && state.inCall));
-    const label = mic.querySelector('.room-tool-label');
-    if (label) label.textContent = muted ? 'Unmute' : 'Mute';
-  }
-  const cam = $('#btn-room-cam');
-  if (cam) {
-    cam.disabled = !state.inCall;
-    cam.classList.toggle('on', camera);
-    cam.setAttribute('aria-pressed', String(camera));
-    const label = cam.querySelector('.room-tool-label');
-    if (label) label.textContent = camera ? 'Stop video' : 'Start video';
-  }
-  const share = $('#btn-room-share');
-  if (share) share.classList.toggle('on', sharing);
   const leave = $('#btn-room-leave');
   if (leave) leave.disabled = !state.roomId;
   const studio = $('#btn-room-studio');
@@ -2383,6 +2379,9 @@ function setStageView(view, { remember = true } = {}) {
   for (const button of $$('#stage-view button')) {
     button.classList.toggle('active', button.dataset.view === wanted);
   }
+  // The way the people are shown belongs to the People view, so its switcher is there
+  // with it and gone when the view is the program alone.
+  $('#people-view')?.classList.toggle('hidden', wanted === 'program');
   if (remember) {
     state.stageView = wanted;
     try {
@@ -2647,6 +2646,8 @@ function wireRoomToolbar() {
   // Breakout rooms: the Rooms button opens the picker, which is also where a
   // notification about the rooms points.
   $('#btn-room-breakout')?.addEventListener('click', () => openBreakoutPicker());
+  // The studio's Rooms tab offers the same picker, for whoever is already reading the list.
+  $('#btn-choose-breakout')?.addEventListener('click', () => openBreakoutPicker());
   $('#btn-breakout-close')?.addEventListener('click', () => closeBreakoutPicker());
   $('#breakout-dialog')?.addEventListener('close', () => closeBreakoutPicker());
   $('#btn-room-people')?.addEventListener('click', () => openPeopleDialog());
@@ -2748,12 +2749,6 @@ const ICONS = {
 function icon(name, { size = 14 }: any = {}) {
   const body = ICONS[name] || '';
   return `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
-}
-
-/** Icon + label for a button that changes with the media state. */
-function iconLabel(button, name, label) {
-  if (!button) return;
-  button.innerHTML = `${icon(name)}<span>${label}</span>`;
 }
 
 /**
@@ -2908,6 +2903,9 @@ function renderPeople() {
   if (!state.members.length) {
     list.append(el('li', {}, [el('div', { class: 'grow muted', text: 'No one here yet.' })]));
   }
+  // The roster is where a host's mute or stop shows up, so my own two buttons are painted
+  // from it as well: they must never disagree with what the room thinks I am doing.
+  renderMyMediaButtons();
 }
 
 /**
@@ -3226,7 +3224,9 @@ function renderBreakouts() {
     summary.textContent =
       breakouts.available === false
         ? 'Breakout rooms are not available on this server.'
-        : 'No breakout rooms yet - pick how many and press Create.';
+        : hasControl()
+          ? 'No breakout rooms yet - pick how many and press Create.'
+          : 'No breakout rooms yet. The host can create them here, and everyone can then pick one to join.';
     return;
   }
 
@@ -3477,7 +3477,11 @@ function renderBreakoutButton() {
   const button = $('#btn-room-breakout');
   if (!button) return;
   const rooms = state.breakouts?.rooms || [];
-  button.classList.toggle('hidden', rooms.length === 0);
+  // **Always on the bar.** A breakout room is somewhere to go, so the way in is visible
+  // to everyone from the moment they are in the room - a button that only appears once a
+  // host has created a room is a button nobody knows exists. The picker explains the
+  // state of the rooms, and creating them is the host's, in the studio's Rooms tab.
+  button.classList.remove('hidden');
   const open = rooms.filter((room) => room.open).length;
   const waiting = Boolean(open) && !state.breakoutId;
   const badge = $('#breakout-unread');
@@ -3491,7 +3495,7 @@ function renderBreakoutButton() {
     ? `${open} breakout room(s) open - pick one to join`
     : rooms.length
       ? 'Breakout rooms exist but are closed'
-      : 'Breakout rooms - pick one to join';
+      : 'Breakout rooms - none yet; a host creates them in the studio';
   const label = button.querySelector('.room-tool-label');
   if (label) label.textContent = state.breakoutId ? breakoutLabel(state.breakoutId) : 'Rooms';
 }
@@ -3553,6 +3557,9 @@ function activateTab(name) {
     renderDestinations();
     renderStreamStatus();
     renderPresetOptions();
+  } else if (name === 'rooms') {
+    // The breakout rooms: what exists, what is open, and who is in them.
+    renderBreakouts();
   } else if (name === 'meeting') {
     renderMembers();
   } else if (name === 'share') {
@@ -4198,7 +4205,7 @@ function updateControlAvailability() {
   $('#btn-close-breakouts').disabled = !canAddSources;
   $('#btn-shuffle-breakouts').disabled = !canAddSources;
   $('#btn-clear-breakouts').disabled = !canAddSources;
-  $('#btn-join-call').disabled = !state.roomId || state.inCall;
+  $('#btn-join-call').disabled = Boolean(state.inCall);
   for (const node of document.querySelectorAll('#program-mode button')) node.disabled = !hasControl();
   // Viewers and visitors never see the host-only panes at all.
   applyRoleVisibility();
@@ -4238,10 +4245,25 @@ function requireControl(message = 'Only the host or a co-host can do that') {
 }
 
 /**
+ * The Share picker's screen button says what pressing it will do.
+ *
+ * There is one screen share at a time: pressing it again ends the share that is running
+ * rather than opening a second one.
+ */
+function renderScreenShareButton() {
+  const button = $('#btn-devices-screen');
+  if (!button) return;
+  const sharing = Boolean(myScreenSource());
+  button.textContent = sharing ? 'Stop sharing' : 'Share screen';
+  button.title = sharing ? 'End your screen share' : 'Share your screen with the room';
+}
+
+/**
  * The camera/microphone picker: what the machine can see, and what is already
  * published into the studio.
  */
 async function renderDevicePicker() {
+  renderScreenShareButton();
   const host = $('#device-list-picker');
   if (!host) return;
   const devices = await state.camera.enumerate();
@@ -4446,15 +4468,419 @@ function announceRequests(previous) {
   }
 }
 
-/** Zoom-style mic/camera toggle for myself: works in or out of the call. */
+// ------------------------------------------------------------- my own settings
+
+/**
+ * The settings screen.
+ *
+ * It is one of the screens - the landing page, the password page, this, and the room - so
+ * opening it stands in front of whatever was there and closing it gives that back
+ * (`updateJoinControls`). It is *mine* rather than the room's: it is reachable before
+ * joining, it is reachable in a call, and nothing on it asks the room for anything.
+ */
+let settingsOpen = false;
+/** What the device check opened, and the interval that lights the bars. */
+let settingsCheck: any = null;
+/** The readout's own ticker: "what this client is doing" is only useful while it moves. */
+let settingsTicker: any = null;
+
+function openSettings() {
+  settingsOpen = true;
+  renderSettings();
+  updateJoinControls();
+  const button = $('#btn-settings');
+  if (button) button.setAttribute('aria-expanded', 'true');
+  if (!settingsTicker) settingsTicker = setInterval(renderSettingsDiagnostics, 1000);
+}
+
+function closeSettings() {
+  settingsOpen = false;
+  stopSettingsCheck();
+  if (settingsTicker) clearInterval(settingsTicker);
+  settingsTicker = null;
+  const button = $('#btn-settings');
+  if (button) button.setAttribute('aria-expanded', 'false');
+  updateJoinControls();
+}
+
+function toggleSettings() {
+  if (settingsOpen) closeSettings();
+  else openSettings();
+}
+
+/**
+ * Paint the whole screen from the state it describes.
+ *
+ * Every value comes from where it already lives - `state.settings` for the preferences this
+ * screen owns, and the same helpers the rest of the app uses for the ones that had a key of
+ * their own (the panes, the people view, the stage view, the mirror, the bell).
+ */
+function renderSettings() {
+  const settings = state.settings;
+  const setValue = (selector, value) => {
+    const node = $(selector);
+    if (node) node.value = value;
+  };
+  const setChecked = (selector, on) => {
+    const node = $(selector);
+    if (node) node.checked = Boolean(on);
+  };
+
+  setValue('#settings-name', settings.name || '');
+  setValue('#settings-role', settings.role || 'viewer');
+  setChecked('#settings-join-mic', settings.joinWithMic !== false);
+  setChecked('#settings-join-video', settings.joinWithVideo === true);
+  setChecked('#settings-mirror', selfViewMirrored());
+  setChecked('#settings-notify', notificationsWanted());
+  setChecked('#settings-record', settings.record !== false);
+  setValue('#settings-view', state.stageView || defaultStageView());
+  setValue('#settings-people-view', peopleViewFor(state.members.length));
+  setChecked('#settings-pane-grid', state.panes.grid !== false);
+  setChecked('#settings-pane-sidebar', state.panes.sidebar !== false);
+  // The split is a host's view, so it is offered as such rather than silently refused.
+  const split = $('#settings-view option[value="split"]');
+  if (split) split.disabled = !hasControl();
+  renderSettingsDevices();
+  renderSettingsPresets();
+  renderSettingsNotifyStatus();
+  renderSettingsDiagnostics();
+}
+
+/** The device pickers: what the browser can see, with "let the browser pick" first. */
+async function renderSettingsDevices() {
+  const mic = $('#settings-mic');
+  const camera = $('#settings-camera');
+  const speaker = $('#settings-speaker');
+  if (!mic || !camera || !speaker) return;
+  const settings = state.settings;
+
+  let devices = { video: [], audio: [] };
+  let outputs = [];
+  try {
+    devices = await state.camera.enumerate();
+    outputs = (await navigator.mediaDevices?.enumerateDevices?.() || []).filter(
+      (entry) => entry.kind === 'audiooutput',
+    );
+  } catch {
+    // a browser that will not list them still gets the defaults below
+  }
+
+  const fill = (select, entries, chosen, auto) => {
+    clear(select);
+    select.append(el('option', { value: '', text: auto }));
+    for (const entry of entries) {
+      select.append(el('option', { value: entry.deviceId, text: entry.label || 'device' }));
+    }
+    select.value = entries.some((entry) => entry.deviceId === chosen) ? chosen : '';
+  };
+
+  fill(mic, devices.audio, settings.micId, 'Default microphone');
+  fill(camera, devices.video, settings.cameraId, 'Default camera');
+  // A speaker can only be chosen where the browser can choose one: `setSinkId` is Chrome,
+  // Edge and Firefox, and Safari follows the system.
+  const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
+  const canChooseSpeaker = Boolean(Ctor && 'setSinkId' in Ctor.prototype);
+  fill(
+    speaker,
+    canChooseSpeaker ? outputs : [],
+    settings.speakerId,
+    canChooseSpeaker ? 'Default speaker' : 'This browser follows the system',
+  );
+  speaker.disabled = !canChooseSpeaker;
+}
+
+/** The broadcast defaults, from the same preset list the Go live tab offers. */
+function renderSettingsPresets() {
+  const select = $('#settings-preset');
+  if (!select) return;
+  clear(select);
+  select.append(el('option', { value: '', text: 'Whatever the room is set to' }));
+  for (const preset of state.presets) {
+    select.append(
+      el('option', { value: preset.label, text: `${preset.label} \u00b7 ${preset.bitrateKbps} kbps` }),
+    );
+  }
+  select.value = state.settings.preset || '';
+}
+
+/** Say what the browser will do about notifications, rather than only offering a switch. */
+function renderSettingsNotifyStatus() {
+  const status = $('#settings-notify-status');
+  if (!status) return;
+  status.textContent = !notificationsSupported()
+    ? 'This browser does not offer desktop notifications.'
+    : Notification.permission === 'denied'
+      ? 'This browser has blocked notifications for this site - allow them in the address bar.'
+      : Notification.permission === 'granted'
+        ? 'Allowed. They only appear while this tab is not the one you are looking at.'
+        : 'Your browser will ask the first time you turn this on.';
+}
+
+/** One line about the microphone in use, for the readout below. */
+function microphoneDiagnostic() {
+  const track = microphoneTracks()[0];
+  if (!track) return 'none captured';
+  const settings = track.getSettings?.() || {};
+  const rate = settings.sampleRate ? ` \u00b7 ${settings.sampleRate} Hz` : '';
+  return `${track.enabled ? 'on' : 'muted'} \u00b7 ${track.label || 'microphone'}${rate}`;
+}
+
+/**
+ * What this client is doing, in plain numbers.
+ *
+ * The same readout the console exposes (`quandriteRelay.stats()`), reduced to the handful
+ * of things that answer "why can I not hear them" and "why is the picture soft": the
+ * connection, the devices in use, the room mixer's own state, and the two relay paths. It
+ * is repainted every second while the screen is open, because a number that never moves
+ * answers nothing.
+ */
+function renderSettingsDiagnostics() {
+  const list = $('#settings-diagnostics');
+  if (!list) return;
+  const stats = (window as any).quandriteRelay?.stats?.() || {};
+  const room = state.speaking?.describe?.() ?? null;
+  const relay = state.relay?.stats?.() ?? null;
+  const publisher = state.publisher?.stats?.() ?? null;
+  const received = stats.received || null;
+  const mine = state.camera.list().filter((source) => LOCAL_MEDIA_KINDS.has(source.kind));
+
+  const rows = [
+    ['Connection', state.socket?.connected ? 'online' : 'offline'],
+    ['Me', state.roomId ? `${state.name || 'you'} \u00b7 ${state.role} \u00b7 room ${state.roomId}` : 'not in a room'],
+    ['Clock', stats.clock?.offsetNs != null ? `offset ${stats.clock.offsetNs} ns, ${stats.clock.samples} samples` : 'not measured yet'],
+    ['Publishing', mine.length ? mine.map((source) => `${source.kind}:${source.label}`).join(', ') : 'nothing'],
+    ['Microphone', microphoneDiagnostic()],
+    [
+      'Room audio',
+      room
+        ? `${room.state} \u00b7 ${room.peers.length} voice(s)${room.ducked ? ' \u00b7 ducked' : ''}${room.feedback?.active ? ' \u00b7 feedback!' : ''}`
+        : 'not started',
+    ],
+    [
+      'Voice relay',
+      received
+        ? `${(received.codecs || []).join('+') || 'idle'} \u00b7 ${received.encoded || 0} sent, ${received.dropped || 0} dropped \u00b7 ${received.decoded || 0} decoded`
+        : 'idle',
+    ],
+    [
+      'Picture relay',
+      relay ? `${relay.rung || 'auto'} \u00b7 ${relay.quality ?? '-'} q \u00b7 ${relay.fps} fps \u00b7 ${relay.measuredKbps} kbps` : 'not running',
+    ],
+    [
+      'Broadcast',
+      publisher?.active
+        ? `${publisher.mimeType || 'encoding'} \u00b7 ${fmtDuration(publisher.uptimeMs)} \u00b7 ${publisher.rebuilds} rebuild(s)`
+        : 'not broadcasting',
+    ],
+    ['Lag', stats.hops ? `${stats.hops.total} (${stats.hops.toServer} out, ${stats.hops.fromServer} back)` : 'no relayed frame yet'],
+  ];
+
+  clear(list);
+  for (const [label, value] of rows) {
+    list.append(el('dt', { text: label }), el('dd', { text: String(value) }));
+  }
+}
+
+
+/**
+ * Check the chosen camera and microphone, publishing nothing.
+ *
+ * The streams opened here belong to this screen: they are closed the moment the check
+ * stops, and they are never handed to the camera manager - so "check my microphone" cannot
+ * put me in a call, announce a source, or turn my camera on for the room.
+ */
+async function startSettingsCheck() {
+  const status = $('#settings-check-status');
+  const button = $('#btn-settings-check');
+  const preview = $('#settings-preview');
+  const settings = state.settings;
+  const problems = [];
+  let video = null;
+  let audio = null;
+
+  if (button) button.disabled = true;
+  if (status) status.textContent = 'Opening the chosen devices...';
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('this browser cannot capture media');
+    video = await navigator.mediaDevices
+      .getUserMedia({ video: settings.cameraId ? { deviceId: { exact: settings.cameraId } } : true })
+      .catch((error) => {
+        problems.push(`camera: ${error.message}`);
+        return null;
+      });
+    audio = await navigator.mediaDevices
+      .getUserMedia({ audio: microphoneConstraints(settings.micId || null) })
+      .catch((error) => {
+        problems.push(`microphone: ${error.message}`);
+        return null;
+      });
+    if (!video && !audio) throw new Error(problems.join('; ') || 'no device could be opened');
+
+    // The meter is this screen's own: one analyser on the microphone it just opened.
+    const Ctor = (window as any).AudioContext || (window as any).webkitAudioContext;
+    const context = audio && Ctor ? new Ctor() : null;
+    let analyser = null;
+    if (context && audio) {
+      context.resume?.().catch?.(() => {});
+      analyser = context.createAnalyser();
+      analyser.fftSize = 512;
+      context.createMediaStreamSource(audio).connect(analyser);
+    }
+    const bars = $$('#settings-level i');
+    const data = analyser ? new Uint8Array(analyser.fftSize) : null;
+
+    settingsCheck = {
+      video,
+      audio,
+      context,
+      timer: setInterval(() => {
+        if (!analyser || !data || !bars.length) return;
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (const value of data) sum += ((value - 128) / 128) ** 2;
+        const level = Math.sqrt(sum / data.length);
+        const lit = Math.round(Math.min(1, level * 5) * bars.length);
+        bars.forEach((bar, index) => bar.classList.toggle('on', index < lit));
+      }, 80),
+    };
+
+    if (preview) {
+      preview.srcObject = video || null;
+      preview.hidden = !video;
+      if (video) preview.play?.().catch(() => {});
+    }
+    if (button) button.textContent = 'Stop the check';
+    if (status) {
+      status.textContent = problems.length
+        ? `${problems.join('; ')} - the rest of the check is working.`
+        : audio
+          ? 'Say something: the bars follow your microphone. Nothing is published.'
+          : 'The camera is open. Nothing is published.';
+    }
+  } catch (error) {
+    stopSettingsCheck();
+    if (status) status.textContent = error.message;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+
+/**
+ * Zoom-style mic/camera toggle for myself: works in or out of the call.
+ *
+/** Close what the check opened, and clear the bars. */
+function stopSettingsCheck() {
+  if (settingsCheck) {
+    clearInterval(settingsCheck.timer);
+    for (const stream of [settingsCheck.video, settingsCheck.audio]) {
+      for (const track of stream?.getTracks?.() || []) track.stop();
+    }
+    settingsCheck.context?.close?.().catch?.(() => {});
+    settingsCheck = null;
+  }
+  const preview = $('#settings-preview');
+  if (preview) {
+    preview.srcObject = null;
+    preview.hidden = true;
+  }
+  for (const bar of $$('#settings-level i')) bar.classList.remove('on');
+  const button = $('#btn-settings-check');
+  if (button) {
+    button.disabled = false;
+    button.textContent = 'Check my camera and microphone';
+  }
+  const status = $('#settings-check-status');
+  if (status) status.textContent = 'Nothing is published while you check.';
+}
+
+function toggleSettingsCheck() {
+  if (settingsCheck) stopSettingsCheck();
+  else startSettingsCheck();
+}
+
+/** Copy the readout, so a bug report can carry what the client was doing. */
+async function copyDiagnostics() {
+  const text = JSON.stringify(
+    {
+      settings: state.settings,
+      panes: state.panes,
+      room: state.roomId,
+      role: state.role,
+      connection: Boolean(state.socket?.connected),
+      devices: state.camera.list().map((source) => ({ id: source.id, kind: source.kind, label: source.label })),
+      stats: (window as any).quandriteRelay?.stats?.() ?? null,
+    },
+    null,
+    2,
+  );
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Diagnostics copied', 'ok');
+  } catch {
+    // No clipboard, or no permission: say so rather than pretending.
+    toast('This browser would not let me copy - the readout is on the screen', 'info');
+  }
+}
+
+/**
+ * Forget every preference this browser holds.
+ *
+ * The keys are cleared and the defaults are applied **live** rather than by reloading: the
+ * room is not mine to throw away, and a reload would leave it. Every preference that had a
+ * key of its own goes back through the same setter the UI uses, so nothing is left holding
+ * a stale copy.
+ */
+function resetMySettings() {
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('quandrite.')) localStorage.removeItem(key);
+    }
+  } catch {
+    // a browser that will not let us clear it still gets the defaults below
+  }
+  state.settings = { ...DEFAULT_SETTINGS };
+  state.stageView = null;
+  state.peopleView = null;
+  state.panes = loadPanes();
+  applyPaneVisibility();
+  setStageView(defaultStageView(), { remember: false });
+  applySelfViewMirror();
+  setNotificationsWanted(false);
+  renderMyMediaButtons();
+  renderSettings();
+  toast('Your settings are back to their defaults', 'ok');
+}
+
+/**
+ * Send the room's sound to the chosen speaker.
+ *
+ * Two contexts play audio in this app - the room mixer, and the relay that carries voice
+ * when peer-to-peer cannot - so both are pointed at the device. Where the browser cannot
+ * choose one (`setSinkId` is Chrome, Edge and Firefox; Safari follows the system), this
+ * says so rather than pretending it worked.
+ */
+async function applyOutputDevice(deviceId = state.settings.speakerId) {
+  const room = (await state.speaking?.setOutputDevice?.(deviceId)) ?? false;
+  // Only when there is a device to choose: waking the relay's context up to say "default"
+  // is pointless, and it is the one context created lazily.
+  if (deviceId) await setRelayedAudioOutputDevice(deviceId);
+  return room;
+}
+
+
+ * The press follows what my own media is doing rather than the room's label for it, so
+ * the same button means the same thing on the landing page's pre-join row and on the
+ * meeting bar. Nothing here needs me to have joined the call first - the room's record
+ * follows me once there is a room to write it in.
+ */
 async function toggleMyMedia(kind) {
   if (kind === 'mic') {
-    const me = state.members.find((member) => member.id === state.clientId);
-    const mute = !(me?.muted ?? false);
+    const mute = myMicEnabled();
     // Unmuting has to be heard: make sure there is a microphone to publish.
     if (!mute) await ensureMicrophone();
     setLocalAudio(!mute);
-    await send(CLIENT.MEMBER_UPDATE, { patch: { muted: mute } });
+    if (state.roomId) await send(CLIENT.MEMBER_UPDATE, { patch: { muted: mute } });
     renderPeople();
     return;
   }
@@ -4466,18 +4892,30 @@ async function toggleMyMedia(kind) {
     await keepVoiceAlive();
     await state.camera.removeSource(source.id);
     state.meeting.setCameraEnabled(false);
-    await send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: false } });
+    if (state.roomId) await send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: false } });
+    renderMyMediaButtons();
     renderPeople();
     return;
   }
 
-  const added = await state.camera.addCamera({ announce: true });
+  // A camera can be turned on before the room is joined: it previews locally, and it is
+  // announced and published the moment there is a room to publish it in. The camera is the
+  // one I chose in my settings, or whatever the browser picks.
+  const added = await state.camera.addCamera({
+    deviceId: state.settings.cameraId || null,
+    announce: Boolean(state.roomId),
+  });
   if (!added) return;
-  // A camera published at any time joins the room mesh, so everyone in the room
-  // sees it - being "in the call" is not a prerequisite.
-  await publishToRoom(added.stream);
-  await send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: true } });
-  if (!hasControl()) toast('Camera published - the host can put you in the grid', 'ok');
+  if (state.roomId) {
+    // A camera published at any time joins the room mesh, so everyone in the room
+    // sees it - being "in the call" is not a prerequisite.
+    await publishToRoom(added.stream);
+    await send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: true } });
+    if (!hasControl()) toast('Camera published - the host can put you in the grid', 'ok');
+  } else {
+    toast('Camera on - press Join call to take it into the room', 'info');
+  }
+  renderMyMediaButtons();
   renderPeople();
 }
 
@@ -4855,19 +5293,7 @@ async function endStream() {
 function wireControls() {
   $('#join-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const name = $('#join-name').value.trim();
-    const roomId = $('#join-room').value.trim().toLowerCase();
-    const role = $('#join-role').value;
-    const password = $('#join-password').value;
-    if (!name || !roomId) return;
-    try {
-      // The password page (if this room needs one) comes up on its own after the
-      // join, between the form and the studio.
-      await joinRoom({ name, roomId, role, password });
-      history.replaceState(null, '', `/?room=${encodeURIComponent(roomId)}&name=${encodeURIComponent(name)}`);
-    } catch (error) {
-      toast(error.message, 'error');
-    }
+    await submitJoinForm();
   });
 
   $('#join-role').addEventListener('change', () => {
@@ -5019,18 +5445,31 @@ function wireControls() {
   $('#btn-devices-grid').addEventListener('click', () => addSelectedDevices('grid'));
   $('#btn-devices-air').addEventListener('click', () => addSelectedDevices('air'));
 
+  // One screen share at a time: the same button starts it and ends it, and a second
+  // share can never stack up behind the first. The client library replaces any share that
+  // somehow survived (a share started from another tab, say) rather than adding to it.
   $('#btn-devices-screen').addEventListener('click', async () => {
-    const source = await state.camera.addScreenShare({ audio: $('#screen-audio').checked });
-    if (source) {
-      await send(CLIENT.MEMBER_UPDATE, { patch: { screenSharing: true } });
-      toast(
-        hasControl()
-          ? 'Screen shared - use the Screen program mode to put it on air'
-          : 'Screen shared with the room - the host can put it on air',
-        'ok',
-      );
+    const sharing = myScreenSource();
+    if (sharing) {
+      await state.camera.removeSource(sharing.id).catch(() => {});
+      if (state.roomId) await send(CLIENT.MEMBER_UPDATE, { patch: { screenSharing: false } });
+      toast('Screen share ended', 'info');
+      renderMyMediaButtons();
       await renderDevicePicker();
+      return;
     }
+
+    const source = await state.camera.addScreenShare({ audio: $('#screen-audio').checked });
+    if (!source) return;
+    if (state.roomId) await send(CLIENT.MEMBER_UPDATE, { patch: { screenSharing: true } });
+    toast(
+      hasControl()
+        ? 'Screen shared - use the Screen program mode to put it on air'
+        : 'Screen shared with the room - the host can put it on air',
+      'ok',
+    );
+    renderMyMediaButtons();
+    await renderDevicePicker();
   });
 
   $('#btn-devices-bluetooth').addEventListener('click', async () => {
@@ -5061,8 +5500,10 @@ function wireControls() {
     if (result) toast('All cameras stopped', 'ok');
   });
 
-  $('#btn-join-call').addEventListener('click', joinCall);
-  // The meeting toolbar and the People view drive the same local media.
+  // "Join call" is the landing page's own action, on the initial state: it enters the room
+  // (when the form has not been used yet) and then joins the call.
+  $('#btn-join-call').addEventListener('click', joinCallFromLanding);
+  // The pre-join toggles, the meeting bar and the People view drive the same local media.
   $('#btn-toggle-mic').addEventListener('click', () => toggleMyMedia('mic'));
   $('#btn-toggle-cam').addEventListener('click', () => toggleMyMedia('camera'));
 
@@ -5185,6 +5626,9 @@ function wireCamera() {
     syncCompositorSources();
     // My own tile shows my video and my controls, so refresh it at once.
     renderParticipants();
+    // ...and my own two buttons follow the device: a camera that ended by itself
+    // (unplugged, or taken by another app) must not leave the bar saying it is on.
+    updateRoomToolbar();
     // Whatever I capture goes to the whole room, whether or not I ever pressed
     // "Join call": a viewer's camera is seen by everyone in the room.
     const captured = localMediaStream();
@@ -5317,41 +5761,56 @@ function wireMeeting() {
 }
 
 /**
- * "Join call" is about being heard: the room mesh is always up, so joining turns
- * my microphone on (publishing a camera first when I have none).
+ * "Join call" from the landing page: the room first, then the call.
+ *
+ * The landing page is the initial state, so this is where joining a meeting happens. One
+ * press takes the name, the room and the role from the form, enters the room, and joins
+ * the call - with the microphone and the camera left exactly as the two toggles beside it
+ * have them. Already in the room (the form was used), it is simply the way into the call.
+ */
+async function joinCallFromLanding() {
+  if (!state.roomId) {
+    const entered = await submitJoinForm();
+    if (!entered) return;
+  }
+  await joinCall();
+}
+
+/**
+ * "Join call" is about being **heard**: the room mesh is always up, so joining makes sure
+ * there is a microphone and turns it on. It never reaches for the camera - that is what the
+ * pre-join toggle is for - and it never overrules a mute the room has already decided on.
  */
 async function joinCall() {
   try {
-    let stream = localMediaStream();
-    if (!stream) {
-      // Anyone may publish their own camera now; the host still decides what
-      // goes out to the viewers.
-      const source = await state.camera.addCamera({ announce: true });
-      stream = source?.stream || null;
-    }
-    if (!stream) {
-      // No camera? A microphone alone is enough to be heard in the call.
-      const microphone = await ensureMicrophone();
-      stream = microphone?.stream || null;
-    }
-    if (!stream) {
-      toast('a camera or a microphone is required to join the call', 'error');
+    const settings = state.settings;
+    // "Join with my camera on" is a setting I chose, so it is not the app switching my
+    // video on behind my back: pressing Join call is what asks for it.
+    if (settings.joinWithVideo && !myCameraSource()) await toggleMyMedia('camera');
+    // Being heard is what joining is for, so a microphone is what it makes sure of. The
+    // camera is not otherwise touched: it belongs to the pre-join toggle.
+    await ensureMicrophone();
+    if (!localMediaStream()) {
+      toast('a microphone or a camera is required to join the call', 'error');
       return;
     }
     state.inCall = true;
     await ensureMesh();
     // The room's record decides whether joining the call turns my microphone on: if the
-    // host muted me, I join the call muted rather than overruling them by pressing a
-    // button. Unmuting is one click away, and it is mine to make.
+    // host muted me - or if I switched my own microphone off before joining, or my settings
+    // say joining should not turn it on - I join the call muted rather than overruling it
+    // by pressing a button. Unmuting is one click away, and it is mine to make.
     const me = state.members.find((member) => member.id === state.clientId);
-    const held = Boolean(me?.muted);
+    const mine = microphoneTracks().length > 0 && !myMicEnabled();
+    const held = Boolean(me?.muted) || mine || settings.joinWithMic === false;
     setLocalAudio(!held);
     renderParticipants();
     $('#btn-join-call').disabled = true;
-    send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: true, muted: held } });
+    // What the room is told about my video is what my video is actually doing.
+    send(CLIENT.MEMBER_UPDATE, { patch: { cameraEnabled: Boolean(myCameraSource()), muted: held } });
     toast(
       held
-        ? 'You are in the call, muted - the host muted you. Unmute when you are ready.'
+        ? 'You are in the call, muted - unmute when you are ready.'
         : 'You are live in the call',
       held ? 'info' : 'ok',
     );

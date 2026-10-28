@@ -244,9 +244,13 @@ export class RoomAudio extends EventTarget {
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.6;
       // The gain is where a voice is turned down: a muted participant, or the whole
-      // room while the program mix is carrying it.
+      // room while the program mix is carrying it. `requested` starts as exactly what
+      // `_applyGains()` would ask for, because the ramp only fires on a *change* - a
+      // voice that arrived while the room was ducked would otherwise be created silent
+      // and never be raised again.
       const gain = context.createGain();
-      gain.gain.value = muted || this.ducked || !monitor ? 0 : 1;
+      const wanted = monitor && !muted && !this.ducked ? 1 : 0;
+      gain.gain.value = wanted;
       source.connect(analyser);
       analyser.connect(gain);
       if (monitor) {
@@ -275,7 +279,7 @@ export class RoomAudio extends EventTarget {
         level: 0,
         heldUntil: 0,
         /** The gain last asked for, so a ramp is not re-issued on every pass. */
-        requested: monitor && !muted ? 1 : 0,
+        requested: wanted,
       });
     } catch (error) {
       this.logger.warn?.('could not mix a stream', error);
@@ -299,7 +303,10 @@ export class RoomAudio extends EventTarget {
     }
     this.entries.delete(id);
     if (this._speaking.delete(id)) this._publish();
-    if (!this.entries.size) this.stop();
+    // Only when nothing is left to sample: the meters - the relayed voice, the program
+    // feed - outlive the voices, and stopping the timer with them would leave those paths
+    // unwatched and the mixer silent about what it is hearing.
+    if (!this.entries.size && !this.meters.size) this.stop();
     return true;
   }
 
@@ -310,6 +317,25 @@ export class RoomAudio extends EventTarget {
     entry.muted = Boolean(muted);
     this._applyGains();
     return true;
+  }
+
+  /**
+   * Send this mixer's output to a chosen speaker.
+   *
+   * `setSinkId` is the only way to pick an output device, and it is not everywhere: a
+   * browser without it follows the system, so this reports false rather than pretending.
+   * An empty id means "the system default".
+   */
+  async setOutputDevice(deviceId: string) {
+    const context = this._ensureContext();
+    if (!context || typeof context.setSinkId !== 'function') return false;
+    try {
+      await context.setSinkId(deviceId || '');
+      return true;
+    } catch (error) {
+      this.logger.warn?.('could not switch the output device', error);
+      return false;
+    }
   }
 
   /** Duck the whole room: the program mix already carries everyone's voice. */

@@ -107,7 +107,7 @@ host that proves the host password takes the seat back.
 
 A socket that drops is never silent: a banner across the top says what happened
 and carries a **Retry now** button, the connection pill turns to `reconnecting`,
-and the join bar keeps the room, name and role so **Rejoin** is one click.
+and the join bar keeps the room, name and role so **Rejoin the room** is one click.
 `Leave` empties the client (media included) without a page reload, so another
 room can be joined straight away. The server pings every open socket and drops
 the ones that stop answering, so a closed tab never lingers in the roster as a
@@ -187,10 +187,13 @@ stream it published with the source, so every client attaches that feed under it
 own id - a co-host can then put a viewer's screen on the program like any other
 source, and it stops cleanly when the share ends (without disturbing that
 person's camera).
-*Join call* is about being **heard** (it turns
-your microphone on and publishes a camera if you have none); *Leave* mutes you and
-drops a member's meeting camera, while the host keeps the camera that is on the
-air.
+**Joining a meeting happens on the landing page**, where the microphone, the camera
+and *Join call* sit with the form: the two toggles are yours to use before anybody
+is in a room, and *Join call* enters the room and joins the call in one press. It is
+about being **heard** - it makes sure there is a microphone and turns it on - and it
+never reaches for the camera: that is the toggle's business, and a video left off
+stays off. *Leave* mutes you and drops a member's meeting camera, while the host
+keeps the camera that is on the air.
 
 When a participant's video reaches the host or a co-host, it is registered as a
 **virtual source** named after them, so it can be composited like any other
@@ -222,10 +225,15 @@ are, where you are, your state and the way out:
 ### Getting in: the landing page
 
 The name, room code, role, password and the join button live on a landing page
-*before* you enter a room. Once you are in, the page gives way to the studio and
-the top bar carries only the essentials: your name, the room, `online`, your role
-and a red **Leave** with an exit icon. Leaving brings the landing page back, ready
-for the next room.
+*before* you enter a room, and so do the meeting's own controls: a **microphone**
+and a **camera** toggle plus **Join call**, as icons with the words in the tooltip.
+The toggles are yours whether or not you have joined anything - turning the camera
+on previews it locally, and it is announced and published the moment you are in a
+room - and *Join call* takes the name, the room and the role from the form, enters
+the room and joins the call. The quiet **Join the room** button is the room without
+the call. Once you are in, the page gives way to the studio and the top bar carries
+only the essentials: your name, the room, `online`, your role and a red **Leave**
+with an exit icon. Leaving brings the landing page back, ready for the next room.
 
 A **brand new room has no host yet**, so if you pick *Host* for a room that has
 none, the landing page offers to **set the host password** there and then (the
@@ -305,6 +313,11 @@ Publishing and placement are immediate, never a two-step:
   `Publish to the room` / `ask for grid` / `ask for air` - publishing always
   reaches the whole room over the mesh, and placing it is a request the host sees
   at once. **Share screen** and **Pair Bluetooth** are open to everyone too.
+- **A screen share happens once.** There is one screen of yours at a time: the library
+  ends whatever you were sharing before it starts the next one, and the same button
+  becomes **Stop sharing** while a share is running, so pressing it again ends it instead
+  of opening a second. Ending it stops the capture, which is also what takes the browser's
+  own "stop sharing" bar away - nobody has to remember to tidy up.
 - `Add to studio` / `Add to grid` / `Put on air` in the **Cameras & screens**
   pane act on the ticked devices - or, if nothing is ticked, on what is already
   published (or the first camera) - then close the pane so the program preview
@@ -321,8 +334,7 @@ Publishing and placement are immediate, never a two-step:
 **Participants choose their own room.** The host sets the rooms up; where somebody goes is
 their own decision, and they are told about it.
 
-For the host (the *People* popup's **Breakout rooms** panel, plus the *…* button on the
-meeting bar):
+For the host (the studio's **Rooms** tab, plus the *…* button on the meeting bar):
 
 1. Pick how many rooms (up to 8) and, optionally, how many minutes they should run for,
    then press **Create**. Everyone except the host is **suggested** a room - a spread the
@@ -341,10 +353,18 @@ meeting bar):
 5. **Announce to all rooms** posts a message into the main room and every breakout, so
    nobody misses it.
 
-For everyone: the **Rooms** button on the meeting bar (with a badge when there is
-somewhere to go) opens the picker - the **Main room**, then each room with *who is
-actually in it* and whether it is open, plus *"suggested for you"* where the host's spread
-put you. One click walks in; the same picker is where the notification points.
+**The rooms are visible from both places they are used from.** The **Rooms** tab in the
+studio is the catalogue - what exists, what is open, who is actually in each one, and a
+**Choose a room to join** button - and the **Rooms** button on the meeting bar (with a
+badge when there is somewhere to go) opens the same picker. The bar's button is always
+there, rooms or not: a way in that only appears once a host has made a room is a way in
+nobody knows about, and the picker says what the state of the rooms is either way. The
+host's controls - create, open, close, shuffle, remove and *announce to all rooms* - are
+inside the tab, gated to the host and co-hosts.
+
+The picker lists the **Main room**, then each room with *who is actually in it* and
+whether it is open, plus *"suggested for you"* where the host's spread put you. One click
+walks in; the same picker is where the notification points.
 
 **Leaving is one click from wherever you are looking**, which is the point: a participant
 in a breakout is usually watching the grid, not the program.
@@ -563,10 +583,18 @@ the same shape in the browser):
   the picture was drawn rather than when it finished encoding, so a slow encoder
   shows up as lag instead of hiding inside it.
 
-**Voice** (16-bit mono PCM, 16 kHz, 32 ms slices - about 32 KB/s):
+**Voice** (Opus at 48 kHz, 48 kbps for a microphone and 96 kbps for a shared
+screen's sound; 48 kHz **24-bit PCM** where WebCodecs is missing, stepping down to
+16-bit while the socket is busy so the slice still goes out):
 
 - **The same rule**: a slice is dropped rather than queued when the socket is
   behind, and a slice that arrives more than 600 ms late is thrown away.
+- **The depth follows the socket.** 24-bit is three bytes a sample - 144 KB/s at
+  48 kHz - and the relay is a fallback path with a 64 KB socket budget, so a slice
+  that cannot fit is sent at 16-bit instead of being dropped. The header says which
+  depth it is (`codec: pcm24` / `pcm16`, plus `bits`) and the receiving end reads
+  exactly that: a slice that does *not* say is read as 16-bit, because reading
+  16-bit samples as 24-bit is noise rather than a rounding error.
 - **A small jitter buffer, pushed forward.** Playback keeps ~50 ms of voice
   queued ahead of the clock to ride out jitter; if it ever falls more than 350 ms
   behind, it jumps forward to now instead of drifting. That is why a struggling
@@ -665,18 +693,44 @@ it if the browser sent none), leaving everything else in the SDP untouched.
 WebCodecs - 48 kbps for a microphone, 96 kbps for a shared screen's sound - and decodes it
 with a per-sender decoder into the same jitter-buffered scheduler the PCM path used, so the
 delay behaviour is unchanged. Where WebCodecs is missing (or refuses the config) the PCM
-slice is still there, and a room can even have both at once.
+slice is still there - **48 kHz 24-bit**, stepping down to 16-bit while the socket is busy
+so the slice is not dropped - and a room can even have both at once. Every slice says which
+depth it is, and anything that does not say (an old sender, or a frame whose header predates
+the field) is read as 16-bit, so a mixed room keeps working instead of playing noise.
 
 | | before | now |
 | --- | --- | --- |
-| codec | PCM 16, mono, 16 kHz | **Opus**, 48 kHz, mono or stereo |
-| bandwidth | ~256 kbps | **~48 kbps** voice, ~96 kbps music |
-| sound | 8 kHz of bandwidth | 20 kHz of bandwidth |
+| codec | PCM 16, mono, 16 kHz | **Opus**, 48 kHz, mono or stereo (fallback: PCM **24-bit**, 48 kHz, 16-bit when the socket is tight) |
+| bandwidth | ~256 kbps | **~48 kbps** voice, ~96 kbps music (the 24-bit fallback is a last resort) |
+| sound | 8 kHz of bandwidth | 20 kHz of bandwidth, 24-bit where there is no encoder |
 
 **Devices.** A microphone is opened as speech - echo cancellation, noise suppression,
 automatic gain, one channel - and a **shared screen is the opposite**: all three processors
 off and stereo kept, because they are exactly what damages music and system sound. Both ask
-for 48 kHz so the whole path runs at one rate instead of quietly resampling.
+for 48 kHz so the whole path runs at one rate instead of quietly resampling. Media captured
+*before* a room exists (the landing page's pre-join row) is not announced into nothing: the
+announcement waits for the room, which is what keeps a pre-join microphone from earning a
+"could not announce source" error.
+
+**What used to break, and what was fixed.** Four faults, all of which sound the same -
+*"the sound broke"*:
+
+- **A voice that arrived while the room was ducked stayed silent for ever.** The program mix
+  carries everyone's voice, so the room's own voices are ducked while a program feed is up;
+  a voice that arrived *during* that window was created at gain 0 while its record said 1,
+  and the ramp only fires on a change - so it never came back up. A new voice now starts at
+  exactly the value `_applyGains()` would ask for, so the end of the duck brings it up with
+  everything else.
+- **The mixer stopped sampling when the last voice left.** The relay's voice and the program
+  feed are *meters*, not voices, and the sample timer was stopped when the last entry went -
+  which left those paths unwatched (no feedback detection on the relay) and the mixer silent
+  about what it was hearing. The timer now stops only when there is nothing left to sample.
+- **A slice that did not declare its depth was read as 24-bit.** Reading 16-bit samples as
+  24-bit is not a small error, it is noise: every slice now says what it is, and anything
+  that does not say is read as 16-bit.
+- **Voice slices evicted the warm pictures.** The server keeps "the newest frame from each
+  source" so a newcomer sees the room - and a camera's microphone shares its source id, so a
+  voice slice took the picture's place. Only pictures are remembered now.
 
 **What the studio can see.** `quandriteRelay.stats().audioQuality` reports, per
 connection, the device's own sample rate and channels, the bitrate ceiling the sender was
@@ -693,7 +747,7 @@ Measured live between two browsers:
 | the microphone the browser handed over | `sampleRate: 48000`, `channels: 1` |
 | the relay | `codecs: ["opus"]`, 1501 frames encoded and sent, 0 encode errors, 0 dropped |
 | decoding the far end | 625 frames decoded, 624 played, 0 decode errors |
-| with WebCodecs deleted, a new source | `codecs: ["opus","pcm16"]` - the fallback still carries voice |
+| with WebCodecs deleted, a new source | `codecs: ["opus","pcm24"]` - the fallback still carries voice, at 48 kHz 24-bit |
 
 ### Chat: the room, one person, or a picture
 
@@ -783,9 +837,12 @@ what goes out and sees who is asking to be on air).
   bar (Chat opening in front of the room), and Share is the picker that opens in front
   of it. Their panels stay in the markup, because that is where those popups borrow
   them from - one panel, one set of handlers.
-- **Mute and Stop video in the Meeting tab are icons**, with the words in the tooltip
-  and the state in the icon (a struck-through microphone means muted). The meeting bar
-  already says them in full, so the studio does not repeat the words.
+- **My own microphone and camera are icons, and they are on the meeting bar**: the same
+  two icons the landing page's pre-join row uses, with the words in the tooltip and the
+  state in the icon (a struck-through microphone means muted). They used to be the words
+  *Mute* and *Stop video*, and the studio's Meeting tab carried the icons - so the bar said
+  what the studio already said. Nothing disables them either: they are yours to use whether
+  or not you have joined the call, and turning one on is what joins you.
 - **One Leave button.** It is on the meeting bar, red, and it does both jobs: it leaves
   the call if you are in one, and leaves the room otherwise. The old top-bar Leave and
   the studio's Leave are gone.
@@ -884,17 +941,20 @@ The studio holds what you *do*, not what you *look at* - the program has its own
 of the room, so it does not need a preview pane, and devices are added from Share, so
 they do not need a pane either. What is left: **In this room** (the people), **Grid
 preview** (where a host arranges what goes out, with the on-air requests in it), and
-the tabbed sidebar - scenes, people, Go live, chat, meeting, share, library.
+the tabbed sidebar - scenes, Go live, **rooms**, meeting, library (People, Chat and
+Share are the bar's and the popups').
 
 - **The program's controls moved to the room**, above the picture they control: the
   `Single camera / All cameras / Screen` buttons and the preset/bitrate/uptime line,
   host-only. The old "On air: …" box is gone - **who is on air is said on the tile
   that is on air**, with a red badge, and in the grid preview beside it.
-- **Mute and Stop video in the Meeting tab are always usable** and carry icons. They
-  are your own controls, so they no longer wait for you to join a call first - and
-  they drive the same single behaviour as the room's bottom bar, so the two can never
-  disagree. Measured: clicking the Meeting tab's mic turned the room bar from `Mute`
-  to `Unmute` and the member list to `muted`.
+- **Mute and Stop video are always usable** and carry icons, wherever they are - the
+  landing page's pre-join row and the meeting bar are the same two controls, painted from
+  one state by one function, so they can never disagree. They no longer wait for you to
+  join a call first: a camera turned on before a room exists previews locally, and it is
+  announced and published the moment you are in one. Measured: pressing the pre-join mic
+  turned the room bar's icon from `micOff` to `mic` and the member list from `muted` to
+  `mic on`, with no call to join first.
 - **My own camera is not a participant tile.** It is the small picture in the corner,
   so the room shows everybody *else* - and the grid is a **grid**: one column count,
   chosen to fill the space (1 tile → 1 column, 4 → 2×2, 5 → 3+2), every tile exactly
@@ -915,8 +975,15 @@ Nothing in the room sends anyone to another page. The room is the page:
   closes, so there is one set of checkboxes and one set of handlers. Measured: the
   dialog opens with the picker and its four device checkboxes, closes cleanly, and the
   panel is back in the studio afterwards.
-- **The meeting bar carries the meeting**: Mute, Start video, Share, Record, …,
-  **People**, **Chat**, Leave - with the labels reading the live state.
+- **The meeting bar sits with the picture it controls**: it is inside the stage,
+  immediately after the program frame, so it is under the program - in the stage's own
+  column when the studio is docked beside the room - and it is a *sibling* of the views
+  rather than a child of one, so switching to People keeps the bar. The self view moved
+  up with it (`bottom: 68px`), because the bottom corner of the stage is where the
+  controls are now.
+- **The meeting bar carries the meeting**: the microphone and camera icons, Share,
+  Record, …, **Rooms**, **People**, **Chat**, Leave - with the state in each icon and
+  the words in its tooltip.
 - The program picture itself lives in the room (`#program-canvas` exists exactly once),
   and its frame follows the on-air aspect ratio, so a wide share is surrounded by
   itself rather than by black.

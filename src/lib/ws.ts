@@ -7,7 +7,7 @@
  * carries a `payload` is dispatched as that payload, not as the envelope.
  */
 
-import { CLIENT, SERVER, CLOCK_SYNC_INTERVAL_MS, clockOffsetNs, decodeRelayFrame, encodeRelayFrame, isRelayFrame, monotonicNs, nsToWire, pushPayload } from '/shared/protocol.js';
+import { CLIENT, SERVER, CLOCK_SYNC_INTERVAL_MS, clockOffsetNs, decodeRelayFrame, encodeRelayFrame, isRelayFrame, monotonicNs, nsToWire, pushPayload } from '@shared/protocol';
 
 export class QuandriteSocket extends EventTarget {
 

@@ -580,6 +580,11 @@ export class SignalingServer {
    */
   _rememberRelayFrame(roomId, header, frame) {
     if (!roomId) return;
+    // **Pictures only.** A voice slice is worthless a moment later - the receiver throws
+    // away anything older than 600 ms - and caching them would evict a real picture from
+    // the small warm cache, which is exactly what a newcomer needs to see. A camera's
+    // microphone shares its source id, so a voice slice would take the picture's place.
+    if (header?.kind === 'audio') return;
     const cache = this.relayFrames.get(roomId) || new Map();
     this.relayFrames.set(roomId, cache);
     cache.set(header?.sourceId || `peer:${header?.from}`, { frame, at: Date.now() });

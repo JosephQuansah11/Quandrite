@@ -9,8 +9,13 @@ import assert from 'node:assert/strict';
 
 import {
   MUSIC_BITRATE_BPS,
+  RELAY_CAPTURE_RATE,
   RELAY_OPUS_MUSIC_BITRATE_BPS,
   RELAY_OPUS_VOICE_BITRATE_BPS,
+  RELAY_PCM_BITS,
+  RELAY_PCM_BYTES,
+  RELAY_PCM_MAX,
+  RELAY_PCM_RATE,
   VOICE_BITRATE_BPS,
   microphoneConstraints,
   opusParameters,
@@ -106,4 +111,19 @@ test('a microphone is processed and a shared screen is not', () => {
   assert.equal(screen.autoGainControl, false, 'nor levelled');
   assert.equal(screen.channelCount, 2, 'and stereo is kept');
   assert.deepEqual(microphoneConstraints(), microphoneConstraints(null), 'no device is the default');
+});
+
+test('the voice path is one standard: 48 kHz, 24-bit', () => {
+  // What video runs at, and what a studio records at - so nothing resamples on the way
+  // through, and the quiet end of a voice is not quantisation noise.
+  assert.equal(RELAY_PCM_RATE, 48_000, 'the PCM fallback runs at 48 kHz');
+  assert.equal(RELAY_PCM_RATE, RELAY_CAPTURE_RATE, 'which is the rate the relay captures at');
+  assert.equal(RELAY_PCM_BITS, 24, 'at 24 bits per sample');
+  assert.equal(RELAY_PCM_BYTES, 3, 'three bytes on the wire');
+  assert.equal(RELAY_PCM_MAX, 8_388_607, 'with 0x7fffff as full scale');
+
+  // The capture path asks for the same rate, so the microphone and the screen share are
+  // already where the encoder wants them.
+  assert.equal(microphoneConstraints().sampleRate, RELAY_PCM_RATE, 'a microphone is opened at 48 kHz');
+  assert.equal(screenAudioConstraints().sampleRate, RELAY_PCM_RATE, 'and so is a shared screen');
 });

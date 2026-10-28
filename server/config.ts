@@ -98,8 +98,11 @@ export function loadConfig(overrides: any = {}) {
 
   const base = {
     rootDir,
-    // The browser only ever sees the compiled client in `build/`.
+    // The browser only ever sees a compiled client. Two of them are served while the
+    // port to React is finishing: `build/public` is the app, and `dist` - the Vite
+    // build of `src/` - is served at `/next` beside it.
     publicDir: path.join(rootDir, 'build', 'public'),
+    distDir: path.join(rootDir, 'dist'),
     sharedDir: path.join(rootDir, 'build', 'shared'),
     recordingsDir,
     uploadsDir,

@@ -111,17 +111,28 @@ test('the studio UI and its shared modules are served', async () => {
   const html = await page.text();
   assert.match(html, /Quandrite/);
   assert.match(html, /id="program-canvas"/);
-  assert.match(html, /js\/app\.js/);
+  // Vite bundles the client, so the page points at a hashed entry rather than at the
+  // individual modules it used to fetch: one script, one stylesheet.
+  const entry = html.match(/src="([^"]+\.js)"/);
+  assert.ok(entry, 'the page loads a script');
+  assert.equal((await fetch(`${base}${entry[1]}`)).status, 200, `${entry[1]} is served`);
+  const styles = html.match(/href="([^"]+\.css)"/);
+  assert.ok(styles, 'the page loads a stylesheet');
+  assert.equal((await fetch(`${base}${styles[1]}`)).status, 200, `${styles[1]} is served`);
 
-  for (const asset of ['/styles.css', '/js/app.js', '/js/compositor.js', '/shared/protocol.js', '/shared/overlays.js', '/shared/destinations.js', '/shared/layout.js']) {
-    const response = await fetch(`${base}${asset}`);
-    assert.equal(response.status, 200, `${asset} is served`);
-  }
-
-  const protocol = await (await fetch(`${base}/shared/protocol.js`)).text();
-  assert.match(protocol, /SCENE_TYPES/);
-
+  // Sources are never served: the browser only ever gets the bundle.
+  assert.equal((await fetch(`${base}/shared/protocol.ts`)).status, 404);
+  assert.equal((await fetch(`${base}/src/main.tsx`)).status, 404);
   assert.equal((await fetch(`${base}/api/unknown`)).status, 404);
+});
+
+test('the React app is served beside the current one while the port finishes', async () => {
+  const page = await fetch(`${base}/next/`);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /id="root"/, 'the new client mounts into #root');
+  // A page of that app, refreshed directly, is still that app.
+  assert.equal((await fetch(`${base}/next/room/abc`)).status, 200);
 });
 
 test('a room snapshot exposes its breakout state', async () => {

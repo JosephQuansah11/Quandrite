@@ -96,6 +96,18 @@ export function createServer(options: any = {}) {
     return next();
   };
   app.use('/shared', denySources, express.static(config.sharedDir, { index: false }));
+  // The React app, built by Vite into `dist/`, is served at `/next` while the current
+  // client is still the app: one server, two entries, and the address decides which.
+  // It is a page-based app, so any path under `/next` that is not a file is a page.
+  app.use('/next', denySources, express.static(config.distDir, { index: 'index.html' }));
+  // Anything else under `/next` that is not a file is a page of that app, so it gets
+  // that app's index - which is what makes `/next/room/abc` work on a refresh.
+  app.use('/next', (req, res, next) => {
+    const indexFile = path.join(config.distDir, 'index.html');
+    if (!fs.existsSync(indexFile)) return next();
+    return res.sendFile(indexFile);
+  });
+
   app.use(denySources, express.static(config.publicDir, { index: 'index.html' }));
 
   app.use((req, res) => {

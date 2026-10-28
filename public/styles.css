@@ -3,7 +3,7 @@
    along the bottom; the studio panes are one toggle away, not always in the way. */
 .room {
   display: none;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
   height: calc(100vh - 108px);
@@ -20,12 +20,18 @@
 .room-heading small { color: var(--muted); font-size: 11.5px; }
 .room-bar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+/* The stage holds the views, and the meeting bar sits under them: the bar is a child of
+   the stage, immediately after the program frame, so the controls stay with the picture
+   they control even when the studio is docked beside the room. It is a sibling of the
+   views rather than a child of one, so switching to People keeps the bar. */
 .room-stage {
   position: relative;
   min-height: 0;
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   padding: 4px 0;
 }
+.room-stage > .room-toolbar { grid-column: 1 / -1; }
 /* The main view holds the program and the people. Which of them is shown - and
    whether both are - is the view switcher's business, and it all happens in this
    one container. */
@@ -135,9 +141,11 @@
 /* What is being presented takes a bigger tile than the faces around it. */
 .room-empty { margin: 0; text-align: center; }
 
-/* My own picture, floating like a call app's self view - and it goes where I put it. */
+/* My own picture, floating like a call app's self view - and it goes where I put it.
+   It sits *above* the meeting bar: the bar lives in the stage now, so the bottom corner
+   is where the controls are. */
 .self-view {
-  position: absolute; right: 10px; bottom: 10px; width: clamp(120px, 16vw, 220px);
+  position: absolute; right: 10px; bottom: 68px; width: clamp(120px, 16vw, 220px);
   aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden;
   border: 1px solid var(--line); background: #05080f; z-index: 3;
   box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
@@ -178,6 +186,10 @@
 .room-tool:disabled { opacity: .5; }
 .room-tool.danger { background: var(--danger); color: #fff; }
 .room-tool.danger:hover { background: #dc2626; }
+/* My own microphone and camera: the icon is the whole button, and the bar's pill shape
+   stays. The words live in the tooltip, as they do on the landing page's pre-join row. */
+.room-tool.icon-only { padding: 9px 11px; }
+.room-tool.icon-only .icon { display: block; }
 
 /* Which breakout room to join: one row per room, and where I am now. */
 .breakout-dialog {
@@ -209,10 +221,18 @@
   background: #0a1120; color: var(--text); border: 1px solid var(--accent);
 }
 
-/* The studio: the panes as they were, as a popup over the room with its tabs as the
-   menu. It fills the container rather than replacing it - nothing here is a page. */
+/* The studio shares the room rather than covering it: the stage keeps its space and the
+   panes dock alongside, so the room stays visible while you work in it. Covering the
+   stage meant opening the studio made the meeting disappear. */
+.room.studio-open {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 440px);
+}
+.room.studio-open > .room-bar { grid-column: 1 / -1; }
+.room.studio-open > .room-stage { grid-column: 1; }
+.room.studio-open > .studio-panes { grid-column: 2; grid-row: 2; }
+
 .studio-panes {
-  position: absolute; inset: 8px; z-index: 30;
+  z-index: 30;
   overflow: auto; padding: 14px; border-radius: 14px;
   background: linear-gradient(180deg, rgba(12, 19, 36, .99), rgba(8, 13, 26, .99));
   border: 1px solid var(--line);
@@ -220,7 +240,7 @@
   min-height: 0;
 }
 .studio-panes.hidden { display: none; }
-/* The room is where it floats over. */
+/* The room is what the panes dock beside. */
 .room { position: relative; }
 
 /* The Share picker and Chat, in front of the room. */
@@ -261,8 +281,15 @@
   .room-toolbar { width: 100%; justify-content: space-between; border-radius: 14px; }
   .room-tool { padding: 9px 10px; }
   .room-tool .room-tool-label { font-size: 12px; }
-  .self-view { width: 30vw; }
-  .studio-panes { inset: 52px 6px 6px; }
+  /* The bar wraps to two lines on a phone, so the self view clears that too. */
+  .self-view { width: 30vw; bottom: 112px; }
+  /* On a phone there is no room beside the stage, so the studio docks under it and the
+     stage keeps the top half: still visible, never covered. */
+  .room.studio-open {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1.15fr) minmax(0, 1fr);
+  }
+  .room.studio-open > .studio-panes { grid-column: 1; grid-row: 3; }
 }
 
 
@@ -312,6 +339,12 @@ button.danger { background: linear-gradient(180deg, #f2555c, #cf2f38); border-co
 button.ghost { background: transparent; }
 button.wide { width: 100%; }
 button.tiny { padding: 4px 8px; font-size: 12px; border-radius: 7px; }
+/* An icon carries the whole button: a square target, the words in the tooltip. */
+button.icon-only {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px; width: 38px; height: 38px;
+}
+button.icon-only .icon { display: block; }
 
 input, select, textarea {
   background: #0b1225;
@@ -368,6 +401,17 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 .share-button:hover { background: rgba(56, 189, 248, .24); }
 .share-button svg { display: block; }
 
+/* My own settings: not a room action, so it is quiet rather than the Share button's
+   accent - but it is always there, in a room or on the landing page. */
+.settings-button {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: transparent; border-color: var(--line); color: var(--muted);
+  font-weight: 600;
+}
+.settings-button:hover { background: #1d2c4a; color: var(--text); }
+.settings-button svg { display: block; }
+.settings-button[aria-expanded='true'] { background: #1d2c4a; color: var(--text); border-color: var(--accent); }
+
 /* Who I am and where I am: the only identity the top bar carries. */
 .who { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .leave-button {
@@ -393,6 +437,73 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 .landing-card .form select { width: 100%; }
 .landing-card small { font-size: 11px; }
 #join-status:empty { display: none; }
+
+/* --------------------------------------- the settings screen (mine, not the room's) */
+/* One screen of its own, like the landing page: the gear in the top bar opens it and
+   "Done" gives the room back. It is wider than the landing card because it carries a
+   readout as well as a form. */
+.settings-card { width: min(760px, 96vw); gap: 10px; }
+.settings-head { display: flex; align-items: center; gap: 10px; }
+.settings-head h1 { font-size: 18px; }
+.settings-head span { font-size: 11.5px; }
+.settings-head button { margin-left: auto; }
+.settings-group {
+  display: grid; gap: 8px;
+  padding: 12px 14px; border-radius: 12px;
+  background: rgba(10, 17, 32, .6); border: 1px solid var(--line);
+}
+.settings-group h2 { font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.settings-group p { font-size: 11.5px; }
+.settings-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.settings-grid label { margin: 0; }
+.settings-panes { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.settings-panes .toggle { font-size: 12px; }
+/* The device check: what the chosen camera and microphone are doing, published nowhere. */
+.settings-check {
+  display: grid; gap: 10px; align-items: center;
+  grid-template-columns: minmax(0, 220px) minmax(0, 1fr);
+}
+.settings-check-body { display: grid; gap: 8px; }
+.settings-preview {
+  width: 100%; aspect-ratio: 16 / 9; object-fit: cover;
+  border-radius: 10px; border: 1px solid var(--line); background: #0b1225;
+  transform: scaleX(-1);
+}
+.settings-preview[hidden] { display: none; }
+/* Twelve bars, lit from the left by the microphone's own level. */
+.settings-level { display: flex; align-items: flex-end; gap: 3px; height: 26px; }
+.settings-level i {
+  flex: 1; height: 100%; border-radius: 3px;
+  background: #1b2740; border: 1px solid var(--line);
+  transition: background .08s linear;
+}
+.settings-level i.on { background: linear-gradient(180deg, #34d399, #22c55e); border-color: #22c55e; }
+/* What this client is doing: a plain two-column readout. */
+.settings-readout {
+  display: grid; gap: 4px 12px; margin: 0; font-size: 12px;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+}
+.settings-readout dt { color: var(--muted); }
+.settings-readout dd { margin: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  .settings-check { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* The pre-join row: my microphone, my camera and the way into the call, on the same line
+   as the form that says who I am. */
+.prejoin { display: flex; align-items: center; gap: 8px; }
+.prejoin #btn-join-call { flex: 1; padding: 9px 14px; font-weight: 600; }
+.prejoin button[aria-pressed='true'] { background: #2a3a5e; border-color: var(--accent); color: #bae6fd; }
+.prejoin-hint { font-size: 11.5px; }
+/* What the camera will publish: mirrored, because everybody expects a mirror, and it is
+   the room's picture that is not. */
+.prejoin-preview {
+  width: 100%; aspect-ratio: 16 / 9; object-fit: cover;
+  border-radius: 10px; border: 1px solid var(--line); background: #0b1225;
+  transform: scaleX(-1);
+}
+.prejoin-preview[hidden] { display: none; }
 
 .status-cluster { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
 .pill {
@@ -421,20 +532,26 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 400px;
+  /* One column: the studio's tabs on top, and under them the grid preview, which fills
+     whatever is left. The studio is the top of the column, not a thing beside it. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
   padding: 16px;
-  align-items: start;
+  align-items: stretch;
+  min-height: 0;
 }
-/* The program picture is the whole width, with the people in the room right
-   under it; the studio tools and the tabbed sidebar sit below. */
-.layout > .participants-panel,
-.layout > .grid-panel { grid-column: 1 / -1; }
-@media (max-width: 1100px) {
-  .layout { grid-template-columns: minmax(0, 1fr); }
-}
+.layout > .sidebar { grid-row: 1; }
+.layout > .stage { grid-row: 2; min-height: 0; }
 
-.stage { display: grid; gap: 16px; min-width: 0; }
+.stage { display: grid; gap: 16px; min-width: 0; min-height: 0; }
+/* The grid preview fills the container it is in: the panel takes the whole height of
+   its row, and the tiles scroll inside it rather than stretching it. */
+.stage > .grid-panel {
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 0; overflow: hidden;
+}
+.stage > .grid-panel > .grid-preview { min-height: 0; overflow: auto; align-content: start; }
 
 .panel {
   background: linear-gradient(180deg, rgba(20, 30, 54, .95), rgba(12, 19, 36, .95));
@@ -475,8 +592,6 @@ label > input, label > select, label > textarea { margin-top: 4px; }
    (see the self view above). */
 .program-frame canvas,
 .program-feed,
-.participant-tile video,
-.participant-tile img,
 .room-tile video,
 .room-tile img,
 .source-tile video,
@@ -563,9 +678,10 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 12px;
-  position: sticky;
-  top: 76px;
-  max-height: calc(100vh - 96px);
+  /* The studio is the top of the column, so it sizes to its content instead of sticking
+     to the viewport - and never grows so tall that the grid preview below it is
+     squeezed out of the container. */
+  max-height: 42vh;
   overflow: auto;
 }
 
@@ -596,24 +712,7 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 .list li .sub { color: var(--muted); font-size: 11px; word-break: break-all; }
 .list li.off { opacity: .55; }
 
-/* -------------------------------------------------------- participant strip */
 
-.participant-strip {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 10px;
-}
-.participant-tile {
-  border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
-  background: #0b1223; display: grid; gap: 0;
-}
-.participant-tile video { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #05080f; }
-.participant-tile .avatar {
-  display: grid; place-items: center; aspect-ratio: 16/9;
-  font-weight: 800; font-size: 22px; color: #bae6fd;
-  background: linear-gradient(135deg, rgba(56, 189, 248, .18), rgba(168, 85, 247, .18));
-}
-.participant-tile.live .avatar { display: none; }
 /* The grid preview: the multi-camera picture, host and co-hosts only. */
 .grid-preview { display: grid; gap: 8px; }
 .grid-preview-tile {
@@ -654,15 +753,8 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 .join-form.in-room input,
 .join-form.in-room select { opacity: 0.72; }
 
-.participant-tile .name { font-size: 12px; font-weight: 600; padding: 6px 8px 0; }
-.participant-tile .sub { font-size: 10.5px; color: var(--muted); padding: 0 8px 6px; }
 /* Which path the picture is on, and how far behind the relay is. */
-.participant-tile .transport { font-size: 10px; padding: 0 8px 6px; color: var(--muted); }
-.participant-tile .transport.p2p { color: var(--ok); font-weight: 600; }
-.participant-tile .transport.relay { color: var(--warn); }
 /* My own mic/camera controls, right on my tile. */
-.participant-tile .tile-actions { display: flex; gap: 4px; flex-wrap: wrap; padding: 0 8px 8px; }
-.participant-tile .tile-actions button { padding: 3px 6px; font-size: 10.5px; border-radius: 7px; }
 .participant-empty { margin: 0; font-size: 12px; }
 
 /* ------------------------------------------------------------ speaking wave */
@@ -688,7 +780,6 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   50% { height: 12px; }
 }
 /* The tile of whoever is talking gets a hint of a ring, the way a call app does. */
-.participant-tile.speaking, .remote-tile.speaking { border-color: var(--ok); }
 @media (prefers-reduced-motion: reduce) {
   .wave i { animation: none; height: 8px; }
 }
@@ -697,10 +788,6 @@ label > input, label > select, label > textarea { margin-top: 4px; }
 
 /* --------------------------------------------------- collapsible panes */
 /* A relayed picture (the socket fallback) sits where the live video would. */
-.participant-tile img.tile-picture {
-  width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #05080f;
-}
-.participant-strip.list .participant-tile img.tile-picture { width: 72px; height: 40px; aspect-ratio: auto; border-radius: 6px; }
 img.relayed-picture { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #05080f; }
 
 /* A collapsed pane keeps its head, so its arrow is always there to bring the
@@ -710,7 +797,6 @@ img.relayed-picture { width: 100%; aspect-ratio: 16/9; object-fit: cover; displa
 .sidebar.pane-collapsed > *:not(.sidebar-head) { display: none !important; }
 .sidebar.pane-collapsed .sidebar-head { margin-bottom: 0; }
 .sidebar.pane-collapsed { padding: 8px; }
-.layout.sidebar-collapsed { grid-template-columns: minmax(0, 1fr) 52px; }
 
 .sidebar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .sidebar-head strong { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
@@ -722,21 +808,27 @@ img.relayed-picture { width: 100%; aspect-ratio: 16/9; object-fit: cover; displa
 }
 .pane-toggle:hover { color: var(--text); border-color: var(--accent); }
 
-/* --------------------------------------------------- how the room is shown */
+/* ------------------------------------------------- how the people are shown */
 
-.participant-strip.slide { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
-.participant-strip.slide .participant-tile { flex: 0 0 clamp(160px, 22vw, 240px); }
-.participant-strip.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
-/* A big room is a list: everybody, with their controls, in one column. */
-.participant-strip.list { display: grid; grid-template-columns: 1fr; gap: 6px; }
-.participant-strip.list .participant-tile { display: flex; align-items: center; gap: 10px; padding: 6px 8px; }
-.participant-strip.list .participant-tile video { width: 72px; height: 40px; aspect-ratio: auto; border-radius: 6px; }
-.participant-strip.list .participant-tile .avatar {
-  width: 72px; height: 40px; aspect-ratio: auto; font-size: 13px; border-radius: 6px;
+/* The same three ways of showing people as before - a slide, a grid, or a list that
+   still carries everyone's controls - now applied to the room's own view, which is
+   where the switcher in the room bar points them. */
+.room-grid.slide {
+  display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px;
+  grid-template-columns: none;
 }
-.participant-strip.list .participant-tile .name { flex: 1 1 auto; padding: 0; }
-.participant-strip.list .participant-tile .sub { flex: 0 0 auto; padding: 0; }
-.participant-strip.list .participant-tile .tile-actions { flex: 0 0 auto; padding: 0; justify-content: flex-end; }
+.room-grid.slide .room-tile { flex: 0 0 clamp(220px, 30vw, 380px); }
+.room-grid.grid { display: grid; gap: 10px; }
+.room-grid.list { display: grid; grid-template-columns: 1fr; gap: 6px; }
+.room-grid.list .room-tile {
+  display: flex; align-items: center; gap: 10px; min-height: 0;
+  aspect-ratio: auto; padding: 6px 8px;
+}
+.room-grid.list .room-tile video,
+.room-grid.list .room-tile .avatar { width: 96px; height: 54px; aspect-ratio: auto; border-radius: 8px; font-size: 14px; }
+.room-grid.list .room-tile .name { position: static; flex: 1 1 auto; padding: 0; background: none; border: 0; }
+.room-grid.list .room-tile .wave { display: none; }
+.room-grid.list .room-tile .tile-tools { position: static; opacity: 1; }
 
 .pane-toggles { display: flex; gap: 4px; flex-wrap: wrap; }
 .pane-toggles button[aria-pressed='true'] { border-color: var(--accent); color: #bae6fd; background: rgba(56, 189, 248, .14); }
@@ -933,7 +1025,6 @@ body.program-fill .program-feed { max-height: calc(100vh - 56px); }
   .layout { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .program-frame { max-height: 60vh; }
   .program-actions { opacity: 1; }
-  .participant-strip.slide .participant-tile { flex: 0 0 46vw; }
   .remote-tile .name { font-size: 10.5px; }
   .wave { height: 10px; }
 }

@@ -10,8 +10,10 @@
  *    it thins music and makes a soft voice drop out. The encoder's real settings live in
  *    the SDP (`a=fmtp:<pt> ...`), not in `setParameters`, so this module rewrites them.
  *  - The relay used to send 16 kHz 16-bit PCM: telephone bandwidth, 256 kbps on the wire,
- *    and no compression to spend on quality. Opus at 48 kHz costs a fraction of that and
- *    sounds like the room.
+ *    and no compression to spend on quality. It now prefers **Opus at 48 kHz** (48 kbps for
+ *    a voice, 96 kbps for a shared screen's sound), and where WebCodecs is missing the PCM
+ *    fallback is 48 kHz **24-bit** rather than telephone-grade - so both paths run at the
+ *    rate video runs at, and the quiet end of a voice is not quantisation noise.
  *
  * The numbers here are the ones both ends have to agree on, so they live in `shared/`.
  */
@@ -26,6 +28,20 @@ export const RELAY_OPUS_VOICE_BITRATE_BPS = 48_000;
 export const RELAY_OPUS_MUSIC_BITRATE_BPS = 96_000;
 /** The relay captures and encodes at full quality; PCM is the fallback, not the target. */
 export const RELAY_CAPTURE_RATE = 48_000;
+/**
+ * The voice standard the relay's PCM fallback runs at: **48 kHz, 24-bit**.
+ *
+ * 48 kHz is the rate video runs at and the rate every modern browser mixes at, so nothing
+ * is resampled on the way through, and 24-bit is the depth a studio records at. This is
+ * only the fallback - Opus is what the relay prefers and what WebRTC always uses - but a
+ * room whose browser has no WebCodecs should not sound like a telephone.
+ */
+export const RELAY_PCM_RATE = RELAY_CAPTURE_RATE;
+export const RELAY_PCM_BITS = 24;
+/** Three bytes per sample, little-endian: what the wire carries. */
+export const RELAY_PCM_BYTES = RELAY_PCM_BITS / 8;
+/** Full scale for a signed 24-bit sample (0x7fffff), so a float sample is one division away. */
+export const RELAY_PCM_MAX = 8_388_607;
 /** Opus is happiest in 20 ms frames, and so is a jitter buffer. */
 export const RELAY_OPUS_FRAME_MS = 20;
 /** Channels the relay encodes: a microphone is one, a shared screen may be two. */

@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { RELAY_LADDER, QualityLadder, ladderIndexForNetwork } from '../public/js/quality.ts';
+import { RELAY_LADDER, QualityLadder, ladderIndexForNetwork } from '../src/lib/quality.ts';
 
 test('the ladder runs from 1080p down, and each rung costs less than the one above', () => {
   assert.equal(RELAY_LADDER[0].name, '1080p', 'the best rung is 1080p');

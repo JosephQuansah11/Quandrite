@@ -8,8 +8,8 @@
  * resulting streams to the program compositor.
  */
 
-import { CLIENT } from '/shared/protocol.js';
-import { microphoneConstraints, screenAudioConstraints } from '/shared/audio.js';
+import { CLIENT } from '@shared/protocol';
+import { microphoneConstraints, screenAudioConstraints } from '@shared/audio';
 
 let sourceCounter = 0;
 
@@ -140,6 +140,37 @@ export class CameraManager extends EventTarget {
   }
 
   /**
+   * Tell the room about a source I published earlier.
+   *
+   * The server only accepts a source from a member, so media captured before a room was
+   * joined - the pre-join camera and microphone - is announced the moment there is a room
+   * to announce it in. A source that is already announced is left alone.
+   *
+   * @returns {Promise<boolean>} whether the server now knows about it.
+   */
+  async announceSource(sourceId) {
+    const source = this.sources.get(sourceId);
+    if (!source || source.announced) return false;
+    try {
+      await this.socket.send(CLIENT.SOURCE_ADD, {
+        source: {
+          id: source.id,
+          kind: source.kind,
+          label: source.label,
+          deviceId: source.deviceId,
+          groupId: source.groupId,
+          meta: { ...source.meta, streamId: source.stream?.id || null },
+        },
+      });
+      source.announced = true;
+      return true;
+    } catch (error) {
+      // Someone else may already have announced the same peer's media, which is fine.
+      return false;
+    }
+  }
+
+  /**
    * Attach one camera (plus its microphone when available) to the studio.
    * @param {{deviceId?: string|null, label?: string, withAudio?: boolean, announce?: boolean}} options
    */
@@ -226,12 +257,21 @@ export class CameraManager extends EventTarget {
     return added;
   }
 
-  /** Share a screen (optionally with system/tab audio) as a source. */
+  /**
+   * Share a screen (optionally with system/tab audio) as a source.
+   *
+   * **One screen at a time.** A second share replaces the first rather than joining it:
+   * the old capture is stopped and removed (which is what stops the browser's "sharing
+   * your screen" bar too), so a room can never end up with two screens of mine on air, and
+   * nobody has to remember to end the previous one.
+   */
   async addScreenShare({ audio = true }: any = {}) {
     if (!navigator.mediaDevices?.getDisplayMedia) {
       this._emit('error', { message: 'this browser cannot share a screen' });
       return null;
     }
+    // Replace, never stack: whatever screen I am sharing now ends here.
+    await this.endScreenShares();
     let stream;
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
@@ -274,8 +314,29 @@ export class CameraManager extends EventTarget {
     return source;
   }
 
-  /** Attach a microphone as an audio-only source (used for program audio). */
-  async addMicrophone({ deviceId = null, label = null }: any = {}) {
+  /**
+   * End every screen share I have open.
+   *
+   * Called before a new share starts (so there is only ever one) and available to the UI
+   * as "stop sharing": removing the source stops the capture tracks, which is also what
+   * takes the browser's own "stop sharing" bar away.
+   *
+   * @returns {Promise<number>} how many shares were ended.
+   */
+  async endScreenShares() {
+    const sharing = this.list().filter((source) => source.kind === 'screen');
+    for (const source of sharing) await this.removeSource(source.id).catch(() => {});
+    return sharing.length;
+  }
+
+  /**
+   * Attach a microphone as an audio-only source (used for program audio).
+   *
+   * `announce` is false while there is no room to announce it in: media can be captured
+   * before anybody has joined (the landing page's pre-join toggle), and the server only
+   * accepts a source from a member.
+   */
+  async addMicrophone({ deviceId = null, label = null, announce = true }: any = {}) {
     if (!this.mediaDevicesSupported) return null;
     let stream;
     try {
@@ -292,7 +353,7 @@ export class CameraManager extends EventTarget {
       for (const track of stream.getTracks()) track.stop();
       return this.sources.get(id);
     }
-    return this._registerSource({ id, kind: 'audio', label: label || 'Microphone', deviceId, stream });
+    return this._registerSource({ id, kind: 'audio', label: label || 'Microphone', deviceId, stream, announce });
   }
 
   async removeSource(id) {

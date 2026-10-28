@@ -2,18 +2,18 @@
   "compilerOptions": {
     "target": "ES2023",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "moduleDetection": "force",
-    "types": ["node"],
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {
-      "/shared/*": ["shared/*"]
+      "@shared/*": ["shared/*"],
+      "@/*": ["src/*"]
     },
-    "allowImportingTsExtensions": true,
     "noEmit": true,
     "isolatedModules": true,
-    "erasableSyntaxOnly": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
@@ -23,5 +23,5 @@
     "strictNullChecks": false,
     "allowJs": false
   },
-  "include": ["shared/**/*.ts", "server/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "shared/**/*.ts", "vite.config.ts"]
 }

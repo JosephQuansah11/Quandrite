@@ -7,10 +7,10 @@
  * mixes every source's audio into one program audio track.
  */
 
-import { overlayDrawModel, wrapText } from '/shared/overlays.js';
-import { computeProgramLayout, resolveProgramSources } from '/shared/layout.js';
+import { overlayDrawModel, wrapText } from '@shared/overlays';
+import { computeProgramLayout, resolveProgramSources } from '@shared/layout';
 
-const DEFAULT_WIDTH = 1920;
+const DEFAULT_WIDTH = 1900;
 const DEFAULT_HEIGHT = 1080;
 
 export class ProgramCompositor {

@@ -379,11 +379,13 @@ export const RELAY_AUDIO_MAX_FPS = 60;
  */
 export const RELAY_AUDIO_BURST = 6;
 /**
- * The PCM fallback: mono, 16-bit, 16 kHz - 32 KB/s, and easy to decode anywhere.
+ * The **legacy** PCM fallback rate: mono, 16-bit, 16 kHz - 32 KB/s, and easy to decode
+ * anywhere.
  *
- * The relay prefers **Opus at 48 kHz** through WebCodecs (see `shared/audio.ts`); this
- * is what a browser without it still sends, and what the receiver falls back to when a
- * frame arrives without a codec.
+ * The relay prefers **Opus at 48 kHz** through WebCodecs, and a client without it now sends
+ * **48 kHz 24-bit** PCM (see `shared/audio.ts`). This rate is what an older sender still
+ * stamps on its slices, and what the receiver falls back to when a frame arrives without a
+ * codec, so a room with an old client in it keeps working.
  */
 export const RELAY_AUDIO_RATE = 16000;
 /** A picture older than this is worthless: showing it only adds its own delay. */

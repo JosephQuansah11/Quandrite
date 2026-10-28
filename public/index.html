@@ -40,6 +40,14 @@
         <span id="rec-pill" class="pill">not recording</span>
       </div>
 
+      <!-- My own settings, one screen: devices, how I join, how the room looks, the
+           notifications, and what this client is doing. It is mine rather than the room's,
+           so it is reachable whether or not I have joined anything. -->
+      <button type="button" id="btn-settings" class="settings-button" title="Your settings - devices, joining, the room, notifications" aria-haspopup="true" aria-expanded="false">
+        <svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.2"/><path d="M12 18.8V21"/><path d="M4.2 7.5l1.9 1.1"/><path d="M17.9 15.4l1.9 1.1"/><path d="M4.2 16.5l1.9-1.1"/><path d="M17.9 8.6l1.9-1.1"/></svg>
+        <span>Settings</span>
+      </button>
+
       <button type="button" id="btn-share" class="share-button hidden" title="Share your camera or screen with the room">
         <svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><path d="M8 7l4-4 4 4"/><path d="M5 13v6h14v-6"/></svg>
         <span>Share</span>
@@ -79,9 +87,36 @@
             />
           </label>
           <!-- A brand new room has no host yet: the password page that follows
-               the join form is where the seat gets protected. -->
-          <button type="submit" id="btn-join" class="primary wide">Join</button>
+               the join form is where the seat gets protected. This is the quiet way in:
+               the room without the call. -->
+          <button type="submit" id="btn-join" class="ghost wide">Join the room</button>
         </form>
+
+        <!-- What the camera will publish, before anybody is in the room: the toggle above
+             turns it on and this is where it is seen. It is muted - it is my own picture,
+             not the room's sound. -->
+        <video id="prejoin-preview" class="prejoin-preview" autoplay playsinline muted hidden></video>
+
+        <!-- Joining a meeting happens here, on the initial state. The microphone, the
+             camera and "Join call" sit with the form, so what I publish is chosen before
+             anybody is in the room, and one press takes the name, the room and the role
+             from the form, enters the room and joins the call.
+
+             The two toggles are mine to use whether or not I have joined - they are the
+             same two actions as the meeting bar's, with the icon carrying the state (a
+             struck-through microphone means muted). -->
+        <div class="prejoin" id="prejoin-controls">
+          <button id="btn-toggle-mic" class="ghost icon-only" title="Mute or unmute your microphone" aria-label="Mute or unmute your microphone">
+            <svg class="icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18.5V21"/><path d="M8.5 21h7"/></svg>
+          </button>
+          <button id="btn-toggle-cam" class="ghost icon-only" title="Start or stop your video" aria-label="Start or stop your video">
+            <svg class="icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5h10.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3z"/><path d="M15.5 11.2 21 8v8l-5.5-3.2z"/></svg>
+          </button>
+          <button type="button" id="btn-join-call" class="primary">Join call</button>
+        </div>
+        <p id="prejoin-hint" class="muted prejoin-hint">
+          Join call enters the room with your microphone on - mute first if you would rather listen.
+        </p>
         <div id="join-status" class="muted"></div>
       </div>
     </section>
@@ -114,6 +149,140 @@
           <button type="button" id="btn-skip-password" class="tiny ghost">Later - enter the room</button>
         </div>
         <div id="password-status" class="muted"></div>
+      </div>
+    </section>
+
+    <!-- My settings, one screen of their own. The landing page is what I need to get *in*;
+         this is what I want once I am in - which devices to use, how joining behaves, how
+         the room is shown to me, and what this client is actually doing. Everything here
+         is mine and lives in this browser, so nothing on this screen asks the room for
+         permission or changes what anybody else sees. -->
+    <section id="settings-page" class="landing hidden">
+      <div class="landing-card settings-card">
+        <header class="settings-head">
+          <h1>Settings</h1>
+          <span class="muted">saved in this browser</span>
+          <button type="button" id="btn-settings-close" class="ghost" title="Close the settings and go back">Done</button>
+        </header>
+
+        <div class="settings-group">
+          <h2>You</h2>
+          <div class="settings-grid">
+            <label>Your name
+              <input id="settings-name" type="text" placeholder="Ada Lovelace" autocomplete="name" />
+            </label>
+            <label>Join as
+              <select id="settings-role" title="The role the join form starts on">
+                <option value="host">Host</option>
+                <option value="cohost">Co-host</option>
+                <option value="viewer">Viewer</option>
+                <option value="visitor">Visitor</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <h2>Devices</h2>
+          <div class="settings-grid">
+            <label>Microphone
+              <select id="settings-mic"></select>
+            </label>
+            <label>Camera
+              <select id="settings-camera"></select>
+            </label>
+            <label>Speaker
+              <select id="settings-speaker"></select>
+            </label>
+          </div>
+          <!-- A check that publishes nothing: the chosen devices are opened here, shown
+               here, and closed again when the check stops. -->
+          <div class="settings-check">
+            <video id="settings-preview" class="settings-preview" autoplay playsinline muted hidden></video>
+            <div class="settings-check-body">
+              <button type="button" id="btn-settings-check" class="tiny">Check my camera and microphone</button>
+              <div class="settings-level" id="settings-level" role="img" aria-label="Microphone level">
+                <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              </div>
+              <p id="settings-check-status" class="muted">Nothing is published while you check.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <h2>When I join</h2>
+          <label class="toggle">
+            <input id="settings-join-mic" type="checkbox" checked />
+            <span>Turn my microphone on when I join the call</span>
+          </label>
+          <label class="toggle">
+            <input id="settings-join-video" type="checkbox" />
+            <span>Turn my camera on when I join the call</span>
+          </label>
+          <p class="muted">The two toggles on the landing page override this for one join.</p>
+        </div>
+
+        <div class="settings-group">
+          <h2>In the room</h2>
+          <div class="settings-grid">
+            <label>Main view
+              <select id="settings-view">
+                <option value="program">Program</option>
+                <option value="people">People</option>
+                <option value="split">Split</option>
+              </select>
+            </label>
+            <label>People shown as
+              <select id="settings-people-view">
+                <option value="slide">Slide</option>
+                <option value="grid">Grid</option>
+                <option value="list">List</option>
+              </select>
+            </label>
+          </div>
+          <label class="toggle">
+            <input id="settings-mirror" type="checkbox" checked />
+            <span>Mirror my own picture (never what the room receives)</span>
+          </label>
+          <div class="settings-panes">
+            <span class="muted">Panes:</span>
+            <label class="toggle"><input id="settings-pane-grid" type="checkbox" /><span>Grid preview</span></label>
+            <label class="toggle"><input id="settings-pane-sidebar" type="checkbox" /><span>Studio sidebar</span></label>
+          </div>
+        </div>
+
+        <div class="settings-group" data-requires="control">
+          <h2>Broadcast</h2>
+          <div class="settings-grid">
+            <label>Video quality
+              <select id="settings-preset"></select>
+            </label>
+          </div>
+          <label class="toggle">
+            <input id="settings-record" type="checkbox" checked />
+            <span>Record the broadcast by default</span>
+          </label>
+          <p class="muted">The defaults the Go live tab starts on; the room's own settings still win.</p>
+        </div>
+
+        <div class="settings-group">
+          <h2>Notifications</h2>
+          <label class="toggle">
+            <input id="settings-notify" type="checkbox" />
+            <span>Tell me about messages, mutes and going live</span>
+          </label>
+          <p id="settings-notify-status" class="muted"></p>
+        </div>
+
+        <div class="settings-group">
+          <h2>This client</h2>
+          <dl class="settings-readout" id="settings-diagnostics"></dl>
+          <div class="row wrap">
+            <button type="button" id="btn-settings-copy" class="tiny ghost" title="Copy the readout above, for a bug report">Copy diagnostics</button>
+            <button type="button" id="btn-settings-reset" class="tiny danger" title="Forget every preference this browser holds">Reset my settings</button>
+          </div>
+          <p class="muted">Reset forgets the preferences above, not the room: nobody else is affected.</p>
+        </div>
       </div>
     </section>
 
@@ -177,6 +346,13 @@
           <strong id="room-heading-name">Quandrite room</strong>
           <small id="room-heading-sub">main room</small>
         </div>
+        <!-- How the people are shown, next to the room they are in. It belongs to the
+             People view, so it appears with it and goes away with it. -->
+        <div class="segmented hidden" id="people-view" role="group" aria-label="How to show the people in the room">
+          <button type="button" data-view="slide" class="active">Slide</button>
+          <button type="button" data-view="grid">Grid</button>
+          <button type="button" data-view="list">List</button>
+        </div>
         <div class="room-bar-actions">
           <span id="room-heading-count" class="muted">0 here</span>
           <div class="segmented" id="stage-view" role="group" aria-label="What to show in the main view">
@@ -236,6 +412,50 @@
             </div>
           </div>
         </div>
+        <!-- The meeting bar, immediately after the program frame: the controls sit with the
+             picture they control. It is a sibling of the stage's views rather than a child
+             of one, so the People view keeps the bar, and the stage keeps it in its own
+             column when the studio is docked beside the room. -->
+        <footer class="room-toolbar" id="room-toolbar">
+          <!-- My own microphone and camera, as icons: the same two the landing page's
+               pre-join row uses, and mine to use whether or not I have joined the call.
+               The words are in the tooltip and the state is in the icon. -->
+          <button type="button" id="btn-room-mic" class="room-tool icon-only" title="Mute or unmute your microphone" aria-label="Mute or unmute your microphone" aria-pressed="false">
+            <svg class="icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18.5V21"/><path d="M8.5 21h7"/></svg>
+          </button>
+          <button type="button" id="btn-room-cam" class="room-tool icon-only" title="Start or stop your video" aria-label="Start or stop your video" aria-pressed="false">
+            <svg class="icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5h10.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3z"/><path d="M15.5 11.2 21 8v8l-5.5-3.2z"/></svg>
+          </button>
+          <button type="button" id="btn-room-share" class="room-tool" title="Share your screen with the room">
+            <span class="room-tool-label">Share</span>
+          </button>
+          <button type="button" id="btn-room-record" class="room-tool" data-requires="control" title="Record the broadcast">
+            <span class="room-tool-label">Record</span>
+          </button>
+          <button type="button" id="btn-room-more" class="room-tool" data-requires="control" title="More studio tools">
+            <span class="room-tool-label">&hellip;</span>
+          </button>
+          <!-- Breakout rooms are always on the bar: a room is somewhere to go, so the way
+               in is visible to everyone rather than appearing once a host has made one. -->
+          <button type="button" id="btn-room-breakout" class="room-tool" title="Breakout rooms - see them and pick one to join">
+            <svg class="icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h7v7H4z"/><path d="M13 4h7v7h-7z"/><path d="M4 13h7v7H4z"/><path d="M13 13h7v7h-7z"/></svg>
+            <span class="room-tool-label">Rooms</span>
+            <span id="breakout-unread" class="room-tool-badge hidden">0</span>
+          </button>
+          <button type="button" id="btn-room-people" class="room-tool" title="Who is in the room">
+            <span class="room-tool-label">People</span>
+          </button>
+          <button type="button" id="btn-room-chat" class="room-tool" title="Chat with the room">
+            <span class="room-tool-label">Chat</span>
+            <span id="chat-unread" class="room-tool-badge hidden">0</span>
+          </button>
+          <button type="button" id="btn-room-notify" class="room-tool" aria-pressed="false" title="Turn desktop notifications on">
+            <span class="room-tool-label">Notify</span>
+          </button>
+          <button type="button" id="btn-room-leave" class="room-tool danger" title="Leave the call">
+            <span class="room-tool-label">Leave</span>
+          </button>
+        </footer>
 
         <div class="stage-view people-view">
           <!-- Everyone in the room. A screen share or the program becomes a tile of its
@@ -268,42 +488,6 @@
         </div>
       </section>
 
-      <footer class="room-toolbar" id="room-toolbar">
-        <button type="button" id="btn-room-mic" class="room-tool" disabled title="Mute or unmute your microphone">
-          <span class="room-tool-label">Mute</span>
-        </button>
-        <button type="button" id="btn-room-cam" class="room-tool" disabled title="Start or stop your video">
-          <span class="room-tool-label">Stop video</span>
-        </button>
-        <button type="button" id="btn-room-share" class="room-tool" title="Share your screen with the room">
-          <span class="room-tool-label">Share</span>
-        </button>
-        <button type="button" id="btn-room-record" class="room-tool" data-requires="control" title="Record the broadcast">
-          <span class="room-tool-label">Record</span>
-        </button>
-        <button type="button" id="btn-room-more" class="room-tool" data-requires="control" title="More studio tools">
-          <span class="room-tool-label">&hellip;</span>
-        </button>
-        <button type="button" id="btn-room-breakout" class="room-tool hidden" title="Breakout rooms - pick one to join">
-          <svg class="icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h7v7H4z"/><path d="M13 4h7v7h-7z"/><path d="M4 13h7v7H4z"/><path d="M13 13h7v7h-7z"/></svg>
-          <span class="room-tool-label">Rooms</span>
-          <span id="breakout-unread" class="room-tool-badge hidden">0</span>
-        </button>
-        <button type="button" id="btn-room-people" class="room-tool" title="Who is in the room">
-          <span class="room-tool-label">People</span>
-        </button>
-        <button type="button" id="btn-room-chat" class="room-tool" title="Chat with the room">
-          <span class="room-tool-label">Chat</span>
-          <span id="chat-unread" class="room-tool-badge hidden">0</span>
-        </button>
-        <button type="button" id="btn-room-notify" class="room-tool" aria-pressed="false" title="Turn desktop notifications on">
-          <span class="room-tool-label">Notify</span>
-        </button>
-        <button type="button" id="btn-room-leave" class="room-tool danger" title="Leave the call">
-          <span class="room-tool-label">Leave</span>
-        </button>
-      </footer>
-
       <!-- The studio: what is left is the things you *do* - scenes, people, chat,
            going live, the library. The program lives in the room, and devices are
            added from Share, so neither needs a pane here. It is a host's and
@@ -311,33 +495,8 @@
            `toggleStudio()` refuses to open it for them (the `hidden` class here is
            the drawer's own state, not a role gate, so it must not be reused as one). -->
       <div class="studio-panes layout hidden" id="studio-panes">
-      <div class="panel participants-panel" data-pane="participants">
-        <div class="panel-head">
-          <h2>In this room <small id="participant-room-label">main room</small></h2>
-          <span id="participant-count" class="muted">0 here</span>
-          <div class="segmented" id="people-view" role="group" aria-label="How to show the people in the room">
-            <button type="button" data-view="slide" class="active">Slide</button>
-            <button type="button" data-view="grid">Grid</button>
-            <button type="button" data-view="list">List</button>
-          </div>
-          <button type="button" class="pane-toggle" data-pane="participants" aria-pressed="true" title="Collapse or expand this pane"><svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></button>
-        </div>
-        <div id="participant-strip" class="participant-strip"></div>
-      </div>
-
-      <section class="stage">
-        <div class="panel grid-panel" id="grid-panel" data-pane="grid" data-requires="control">
-          <div class="panel-head">
-            <h2>Grid preview <small id="grid-preview-summary">No cameras or screens yet.</small></h2>
-            <button type="button" class="pane-toggle" data-pane="grid" aria-pressed="true" title="Collapse or expand this pane"><svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></button>
-          </div>
-          <!-- Who is asking to be put on the grid or on air, with one-click apply: the
-               host decides here, where the grid itself is. -->
-          <div id="source-requests" class="source-requests muted"></div>
-          <div id="grid-preview" class="grid-preview"></div>
-        </div>
-
-      </section>
+      <!-- The studio comes first: the tabs you work in, and under them the grid preview,
+           which fills whatever is left of the column. -->
 
       <aside class="sidebar" data-pane="sidebar">
         <div class="sidebar-head">
@@ -347,6 +506,10 @@
         <nav class="tabs" id="tabs">
           <button data-tab="scenes" class="active">Scenes</button>
           <button data-tab="platforms">Go live</button>
+          <!-- Breakout rooms are a place in the studio, not a hidden sub-section of
+               People: everyone can see the rooms and pick one, and the controls inside
+               are the host's. -->
+          <button data-tab="rooms">Rooms</button>
           <button data-tab="meeting">Meeting</button>
           <button data-tab="recordings">Library</button>
         </nav>
@@ -401,36 +564,8 @@
             <button id="btn-unmute-me" class="tiny ghost">Unmute me</button>
             <button id="btn-claim-host" class="tiny ghost" title="Claim the host seat with the room password">Claim host</button>
           </div>
-          <div id="breakout-panel" class="credentials" data-requires="control">
-            <h3>Breakout rooms</h3>
-            <p class="muted">
-              Split the room for smaller discussions. Everyone only sees and hears the room they are
-              in, and the host can drop in on any of them.
-            </p>
-            <div class="row wrap">
-              <label class="inline">Rooms
-                <input id="breakout-count" type="number" min="1" max="8" value="2" />
-              </label>
-              <label class="inline">Minutes
-                <input id="breakout-duration" type="number" min="0" max="180" value="0" />
-              </label>
-            </div>
-            <div class="row wrap">
-              <button id="btn-create-breakouts" class="tiny primary">Create</button>
-              <button id="btn-open-breakouts" class="tiny">Open all</button>
-              <button id="btn-close-breakouts" class="tiny">Close all</button>
-              <button id="btn-shuffle-breakouts" class="tiny">Shuffle</button>
-              <button id="btn-clear-breakouts" class="tiny danger">Remove</button>
-            </div>
-            <div id="breakout-summary" class="muted"></div>
-            <ul id="breakout-list" class="list"></ul>
-            <form id="breakout-announce-form" class="form">
-              <label>Message every room
-                <input id="breakout-announce-text" type="text" placeholder="Five minutes left" />
-              </label>
-              <button type="submit" class="ghost wide tiny">Announce to all rooms</button>
-            </form>
-          </div>
+          <!-- Breakout rooms live in the studio's Rooms tab: they are a place to go, not a
+               detail of the roster. -->
           <div id="room-credentials" class="credentials" data-requires="host">
             <h3>Room passwords</h3>
             <p class="muted">
@@ -531,18 +666,52 @@
           </form>
         </div>
 
-        <div class="tab-panel hidden" data-panel="meeting">
-          <!-- My own controls: icons, because the meeting bar already says the words.
-               They are mine to use whether or not I have joined the call. -->
-          <div class="row wrap">
-            <button id="btn-toggle-mic" class="ghost icon-only" title="Mute or unmute your microphone" aria-label="Mute or unmute your microphone">
-              <svg class="icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18.5V21"/><path d="M8.5 21h7"/></svg>
-            </button>
-            <button id="btn-toggle-cam" class="ghost icon-only" title="Start or stop your video" aria-label="Start or stop your video">
-              <svg class="icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5h10.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3z"/><path d="M15.5 11.2 21 8v8l-5.5-3.2z"/></svg>
-            </button>
-            <button id="btn-join-call" class="primary">Join call</button>
+        <!-- Breakout rooms, in the studio: what the rooms are, who is in them, and the way
+             in. Everyone sees the list and can pick a room; creating, opening, closing,
+             shuffling and removing them are the host's controls, and so is messaging every
+             room at once. -->
+        <div class="tab-panel hidden" data-panel="rooms">
+          <div id="breakout-panel" class="credentials">
+            <h3>Breakout rooms</h3>
+            <p class="muted">
+              Split the room for smaller discussions. Everyone only sees and hears the room they are
+              in, and the host can drop in on any of them.
+            </p>
+            <div class="row wrap" data-requires="control">
+              <label class="inline">Rooms
+                <input id="breakout-count" type="number" min="1" max="8" value="2" />
+              </label>
+              <label class="inline">Minutes
+                <input id="breakout-duration" type="number" min="0" max="180" value="0" />
+              </label>
+            </div>
+            <div class="row wrap" data-requires="control">
+              <button id="btn-create-breakouts" class="tiny primary">Create</button>
+              <button id="btn-open-breakouts" class="tiny">Open all</button>
+              <button id="btn-close-breakouts" class="tiny">Close all</button>
+              <button id="btn-shuffle-breakouts" class="tiny">Shuffle</button>
+              <button id="btn-clear-breakouts" class="tiny danger">Remove</button>
+            </div>
+            <div id="breakout-summary" class="muted"></div>
+            <ul id="breakout-list" class="list"></ul>
+            <!-- The same picker the meeting bar's Rooms button opens, for whoever is
+                 already reading the list. -->
+            <div class="row wrap">
+              <button id="btn-choose-breakout" class="tiny primary" title="Pick the breakout room to join">Choose a room to join</button>
+            </div>
+            <form id="breakout-announce-form" class="form" data-requires="control">
+              <label>Message every room
+                <input id="breakout-announce-text" type="text" placeholder="Five minutes left" />
+              </label>
+              <button type="submit" class="ghost wide tiny">Announce to all rooms</button>
+            </form>
           </div>
+        </div>
+
+        <div class="tab-panel hidden" data-panel="meeting">
+          <!-- Who is here. My own microphone and camera are the meeting bar's icons, and
+               the way into the call is "Join call" on the landing page, where it belongs:
+               this pane is the roster. -->
           <ul id="member-list" class="list"></ul>
           <!-- The room's own grid is out in the stage: the People tab is the list. -->
         </div>
@@ -552,6 +721,21 @@
           <ul id="recording-list" class="list"></ul>
         </div>
       </aside>
+
+      <!-- Under the studio, and filling the rest of the column: the grid the broadcast
+           is built from, with who is asking to be on it. -->
+      <section class="stage">
+        <div class="panel grid-panel" id="grid-panel" data-pane="grid" data-requires="control">
+          <div class="panel-head">
+            <h2>Grid preview <small id="grid-preview-summary">No cameras or screens yet.</small></h2>
+            <button type="button" class="pane-toggle" data-pane="grid" aria-pressed="true" title="Collapse or expand this pane"><svg class="icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.5l6 6 6-6"/></svg></button>
+          </div>
+          <!-- Who is asking to be put on the grid or on air, with one-click apply: the
+               host decides here, where the grid itself is. -->
+          <div id="source-requests" class="source-requests muted"></div>
+          <div id="grid-preview" class="grid-preview"></div>
+        </div>
+      </section>
       </div>
     </main>
 
