@@ -87,7 +87,8 @@ export function RoomPage({ session }: { session: any }) {
         </div>
       </section>
 
-      <footer className="room-toolbar">
+      {studio ? <StudioPane session={session} tab={tab} onTab={setTab} onClose={() => setStudio(false)} /> : null}
+// <footer className="room-toolbar">
         <Toolbar
           className="room-toolbar-inner"
           tool
@@ -111,9 +112,8 @@ export function RoomPage({ session }: { session: any }) {
             { label: 'Leave', icon: 'leave', variant: 'danger', onClick: session.leave },
           ]}
         />
-      </footer>
+      // </footer>
 
-      {studio ? <StudioPane session={session} tab={tab} onTab={setTab} onClose={() => setStudio(false)} /> : null}
-    </main>
+      </main>
   );
 }

@@ -50,7 +50,7 @@
 
 /* The program frame is the shape of the picture, and never taller than its slot. */
 .program-view { min-height: 0; }
-.program-view .program-frame { max-height: 100%; width: 100%; margin: 0 auto; }
+.program-view .program-frame {  max-width: 850px;  max-height: 95%; margin: 0 auto; }
 
 /* The studio floats over the room: the room keeps its own space underneath, and the
    popup fills the container it belongs to. */
@@ -179,6 +179,7 @@
   padding: 8px 12px; border-radius: 999px;
   background: rgba(10, 16, 30, .92); border: 1px solid var(--line);
   box-shadow: 0 12px 34px rgba(0, 0, 0, .45);
+  height: 5rem;
 }
 
 /* --------------------------------------------------------------- reactions */
@@ -273,7 +274,7 @@
 .room-tool.danger:hover { background: #dc2626; }
 /* My own microphone and camera: the icon is the whole button, and the bar's pill shape
    stays. The words live in the tooltip, as they do on the landing page's pre-join row. */
-.room-tool.icon-only { padding: 9px 11px; }
+.room-tool.icon-only { padding: 9px 11px;   } 
 .room-tool.icon-only .icon { display: block; }
 
 /* Which breakout room to join: one row per room, and where I am now. */
@@ -451,7 +452,7 @@ button.tiny { padding: 4px 8px; font-size: 12px; border-radius: 7px; }
 /* An icon carries the whole button: a square target, the words in the tooltip. */
 button.icon-only {
   display: inline-flex; align-items: center; justify-content: center;
-  padding: 8px; width: 38px; height: 38px;
+  padding: 8px; 
 }
 button.icon-only .icon { display: block; }
 
@@ -699,7 +700,7 @@ label > input, label > select, label > textarea { margin-top: 4px; }
   max-height: min(88vh, 100%);
   width: 100%;
 }
-#program-canvas { width: 100%; height: 100%; display: block; object-fit: contain; }
+#program-canvas { width: 100%; height: 100%; display: block; object-fit: contain; gap:1px }
 /* What goes *out* is never mirrored: the program picture, the room's tiles of other
    people, and the grid preview are the real thing, and mirroring any of them would
    reverse text in the picture for everyone else. Only my own preview is a mirror
@@ -1007,10 +1008,10 @@ img.relayed-picture { width: 100%; aspect-ratio: 16/9; object-fit: cover; displa
   padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
   font-weight: 600;
 }
-.icon { vertical-align: -2px; }
-button .icon { margin-right: 5px; }
-.device-chip .icon { margin-right: 4px; }
-.media-state .icon { margin-right: 4px; }
+.icon { vertical-align: -2px;  width: 1.5rem;  height: 1.5rem; }
+button .icon { margin-right: 5px;   width: 1.5rem;  height: 1.5rem; }
+.device-chip .icon { margin-right: 4px;   width: 1.5rem;  height: 1.5rem; }
+.media-state .icon { margin-right: 4px;   width: 1.5rem;  height: 1.5rem; }
 
 .role-badge.role-host { border-color: var(--accent); color: #bae6fd; background: rgba(56, 189, 248, .14); }
 .role-badge.role-cohost { border-color: var(--accent-2); color: #e9d5ff; background: rgba(168, 85, 247, .14); }
@@ -1096,7 +1097,7 @@ label.inline input { width: 74px; }
   background: var(--danger); color: #fff; font-size: 11px; font-weight: 700;
 }
 .room-tool-badge.hidden { display: none; }
-.room-tool.on { background: #2a3a5e; border-color: var(--accent); color: #bae6fd; }
+.room-tool.on { background: #2a3a5e; border-color: var(--accent); color: #bae6fd;   }
 
 .stream-status { font-size: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
 .broadcast-box { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
@@ -1137,7 +1138,7 @@ body.program-fill .program-feed { max-height: calc(100vh - 56px); }
   /* On a phone the program keeps the whole width, and the people below it - so a
      share is seen at its best rather than shrunk inside a black box. */
   .layout { grid-template-columns: minmax(0, 1fr); gap: 10px; }
-  .program-frame { max-height: 60vh; }
+  .program-frame { max-height: 80vh; }
   .program-actions { opacity: 1; }
   .remote-tile .name { font-size: 10.5px; }
   .wave { height: 10px; }

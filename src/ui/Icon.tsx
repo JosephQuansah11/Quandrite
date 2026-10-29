@@ -24,7 +24,7 @@ const PATHS: Record<string, string> = {
   refresh: '<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4.5V10h-5.5"/>',
 };
 
-export function Icon({ name, size = 15 }: { name: string; size?: number }) {
+export function Icon({ name, size = 25 }: { name: string; size?: number }) {
   return (
     <svg
       className="icon"
